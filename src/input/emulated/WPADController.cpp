@@ -151,19 +151,7 @@ void WPADController::WPADRead(WPADStatus_t* status)
 
 #if HAS_WIIMOTE
 		BalanceBoardData bb_data{};
-		bool has_bb = false;
-		for (const auto& controller : m_controllers)
-		{
-			if (controller && controller->api() == InputAPI::Wiimote)
-			{
-				auto native = static_cast<NativeWiimoteController*>(controller.get());
-				if (native->get_balance_board_data(bb_data))
-				{
-					has_bb = true;
-					break;
-				}
-			}
-		}
+		bool has_bb = get_balance_board_data(bb_data);
 
 		if (has_bb)
 		{
@@ -171,8 +159,8 @@ void WPADController::WPADRead(WPADStatus_t* status)
 			ex_status->press[1] = bb_data.raw[1];
 			ex_status->press[2] = bb_data.raw[2];
 			ex_status->press[3] = bb_data.raw[3];
-			ex_status->temp = bb_data.temp;
-			ex_status->battery = bb_data.battery;
+			ex_status->temp = bb_data.temp > 0 ? bb_data.temp : 24;
+			ex_status->battery = bb_data.battery > 0 ? bb_data.battery : 0xFF;
 		}
 		else
 #endif
@@ -439,4 +427,20 @@ void WPADController::KPADRead(KPADStatus_t& status, const BtnRepeat& repeat)
 	}
 
 	
+}
+
+bool WPADController::get_balance_board_data(BalanceBoardData& out) const
+{
+#if HAS_WIIMOTE
+	for (const auto& controller : m_controllers)
+	{
+		if (controller && controller->api() == InputAPI::Wiimote)
+		{
+			auto native = static_cast<NativeWiimoteController*>(controller.get());
+			if (native->get_balance_board_data(out))
+				return true;
+		}
+	}
+#endif
+	return false;
 }

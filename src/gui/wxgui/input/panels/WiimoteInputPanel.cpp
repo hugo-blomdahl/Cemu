@@ -251,11 +251,8 @@ void WiimoteInputPanel::on_extension_change(wxCommandEvent& event)
 
 void WiimoteInputPanel::on_timer(const EmulatedControllerPtr& emulated_controller, const ControllerPtr& controller)
 {
-	if (emulated_controller)
+	if (const auto wiimote = std::dynamic_pointer_cast<WiimoteController>(emulated_controller))
 	{
-		const auto wiimote = std::dynamic_pointer_cast<WiimoteController>(emulated_controller);
-		wxASSERT(wiimote);
-
 		wiimote->set_device_type(m_device_type);
 	}
 
@@ -272,9 +269,7 @@ void WiimoteInputPanel::load_controller(const EmulatedControllerPtr& emulated_co
 {
 	InputPanel::load_controller(emulated_controller);
 
-	if (emulated_controller) {
-		const auto wiimote = std::dynamic_pointer_cast<WiimoteController>(emulated_controller);
-		wxASSERT(wiimote);
+	if (const auto wiimote = std::dynamic_pointer_cast<WiimoteController>(emulated_controller)) {
 		set_active_device_type(wiimote->get_device_type());
 	}
 }

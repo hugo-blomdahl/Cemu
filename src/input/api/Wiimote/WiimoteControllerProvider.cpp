@@ -108,10 +108,19 @@ void WiimoteControllerProvider::RefreshControllers()
 		}
 		if (isDuplicate)
 			continue;
+		size_t targetIndex = 0;
 		if (lowestReplaceableIndex != -1)
+		{
+			targetIndex = (size_t)lowestReplaceableIndex;
 			m_wiimotes.replace(lowestReplaceableIndex, std::make_unique<Wiimote>(device));
+		}
 		else
+		{
+			targetIndex = m_wiimotes.size();
 			m_wiimotes.push_back(std::make_unique<Wiimote>(device));
+		}
+		const uint8 mask = (uint8)(1 << (4 + (targetIndex % 4)));
+		send_packet(targetIndex, {kLED, mask});
 	}
 }
 
@@ -147,9 +156,26 @@ void WiimoteControllerProvider::request_status(size_t index)
 void WiimoteControllerProvider::set_led(size_t index, size_t player_index)
 {
 	uint8 mask = 0;
-	mask |= 1 << (4 + (player_index % 4));
-	if (player_index >= 4)
-		mask |= 1 << (4 + ((player_index - 3) % 4));
+	bool is_bb = false;
+	{
+		std::shared_lock lock(m_device_mutex);
+		if (index < m_wiimotes.size())
+		{
+			std::shared_lock read_lock(m_wiimotes[index].mutex);
+			is_bb = std::holds_alternative<BalanceBoardData>(m_wiimotes[index].state.m_extension);
+		}
+	}
+
+	if (is_bb)
+	{
+		mask = 0x10; // Balance Board power button LED
+	}
+	else
+	{
+		mask |= 1 << (4 + (player_index % 4));
+		if (player_index >= 4)
+			mask |= 1 << (4 + ((player_index - 3) % 4));
+	}
 	send_packet(index, {kLED, mask});
 }
 
@@ -345,7 +371,7 @@ void WiimoteControllerProvider::reader_thread()
 					{
 						if (size == 0xf)
 						{
-							cemuLog_logDebug(LogType::Force,"Extension type received but no extension connected");
+							cemuLog_log(LogType::Force,"Extension type received but no extension connected");
 							continue;
 						}
 
@@ -354,48 +380,56 @@ void WiimoteControllerProvider::reader_thread()
 						data += 6; // 48
 						be_type >>= 16;
 						be_type &= 0xFFFFFFFFFFFF;
-						switch (be_type.value())
+						const uint64 ext_val = be_type.value();
+						const uint16 ext_id_16 = (uint16)(ext_val & 0xFFFF);
+						cemuLog_log(LogType::Force, "Extension Type Raw: 0x{:012x} (id16: 0x{:04x})", ext_val, ext_id_16);
+
+						if (ext_val == kExtensionBalanceBoard || ext_id_16 == 0x0402 || ext_id_16 == 0x2A2C)
 						{
-						case kExtensionNunchuck:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: Nunchuck");
-							new_state.m_extension = NunchuckData{};
-							break;
-						case kExtensionClassic:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: Classic");
-							new_state.m_extension = ClassicData{};
-							break;
-						case kExtensionClassicPro:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: Classic Pro");
-							new_state.m_extension = ClassicData{};
-                            break;
-						case kExtensionGuitar:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: Guitar");
-                            break;
-						case kExtensionDrums:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: Drums");
-                            break;
-						case kExtensionBalanceBoard:
-						case kExtensionBalanceBoardEncrypted:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: Balance Board");
+							cemuLog_log(LogType::Force, "Extension Type Received: Balance Board (raw: 0x{:012x})", ext_val);
 							new_state.m_extension = BalanceBoardData{};
-                            break;
-						case kExtensionMotionPlus:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: MotionPlus");
-							set_motion_plus(index, true);
-							new_state.m_motion_plus = MotionPlusData{};
-							break;
-						case kExtensionPartialyInserted:
-                            cemuLog_logDebug(LogType::Force,"Extension only partially inserted");
-							new_state.m_extension = {};
-							request_status(index);
-							break;
-						case kExtensionMotionPlusInactive:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: Inactive MotionPlus");
-							break;
-						default:
-                            cemuLog_logDebug(LogType::Force,"Unknown extension: {:#x}", be_type.value());
-                            new_state.m_extension = {};
-							break;
+							send_packet(index, {kLED, 0x10});
+						}
+						else
+						{
+							switch (ext_val)
+							{
+							case kExtensionNunchuck:
+								cemuLog_log(LogType::Force, "Extension Type Received: Nunchuck");
+								new_state.m_extension = NunchuckData{};
+								break;
+							case kExtensionClassic:
+								cemuLog_log(LogType::Force, "Extension Type Received: Classic");
+								new_state.m_extension = ClassicData{};
+								break;
+							case kExtensionClassicPro:
+								cemuLog_log(LogType::Force, "Extension Type Received: Classic Pro");
+								new_state.m_extension = ClassicData{};
+								break;
+							case kExtensionGuitar:
+								cemuLog_log(LogType::Force, "Extension Type Received: Guitar");
+								break;
+							case kExtensionDrums:
+								cemuLog_log(LogType::Force, "Extension Type Received: Drums");
+								break;
+							case kExtensionMotionPlus:
+								cemuLog_log(LogType::Force, "Extension Type Received: MotionPlus");
+								set_motion_plus(index, true);
+								new_state.m_motion_plus = MotionPlusData{};
+								break;
+							case kExtensionPartialyInserted:
+								cemuLog_log(LogType::Force, "Extension only partially inserted");
+								new_state.m_extension = {};
+								request_status(index);
+								break;
+							case kExtensionMotionPlusInactive:
+								cemuLog_log(LogType::Force, "Extension Type Received: Inactive MotionPlus");
+								break;
+							default:
+								cemuLog_log(LogType::Force, "Unknown extension: 0x{:012x}", ext_val);
+								new_state.m_extension = {};
+								break;
+							}
 						}
 
 						if (new_state.m_extension.index() != 0)
@@ -463,7 +497,6 @@ void WiimoteControllerProvider::reader_thread()
 					}
 					else if (address == 0x0024)
 					{
-						cemuLog_logDebug(LogType::Force, "Balance board calibration 0kg/17kg received");
 						if (std::holds_alternative<BalanceBoardData>(new_state.m_extension))
 						{
 							auto& bb = std::get<BalanceBoardData>(new_state.m_extension);
@@ -475,12 +508,11 @@ void WiimoteControllerProvider::reader_thread()
 							bb.calibration.kg17[1] = ((uint16)data[10] << 8) | data[11];
 							bb.calibration.kg17[2] = ((uint16)data[12] << 8) | data[13];
 							bb.calibration.kg17[3] = ((uint16)data[14] << 8) | data[15];
-							cemuLog_logDebug(LogType::Force, "Balance Board calib: TR 0kg={}, 17kg={}", bb.calibration.zero[0], bb.calibration.kg17[0]);
+							cemuLog_log(LogType::Force, "Balance board calibration 0kg/17kg received: TR 0kg={}, 17kg={}", bb.calibration.zero[0], bb.calibration.kg17[0]);
 						}
 					}
 					else if (address == 0x0034)
 					{
-						cemuLog_logDebug(LogType::Force, "Balance board calibration 34kg received");
 						if (std::holds_alternative<BalanceBoardData>(new_state.m_extension))
 						{
 							auto& bb = std::get<BalanceBoardData>(new_state.m_extension);
@@ -488,7 +520,7 @@ void WiimoteControllerProvider::reader_thread()
 							bb.calibration.kg34[1] = ((uint16)data[2] << 8) | data[3];
 							bb.calibration.kg34[2] = ((uint16)data[4] << 8) | data[5];
 							bb.calibration.kg34[3] = ((uint16)data[6] << 8) | data[7];
-							cemuLog_logDebug(LogType::Force, "Balance Board calib: TR 34kg={}", bb.calibration.kg34[0]);
+							cemuLog_log(LogType::Force, "Balance board calibration 34kg received: TR 34kg={}", bb.calibration.kg34[0]);
 						}
 					}
 					else
@@ -1086,7 +1118,7 @@ void WiimoteControllerProvider::update_report_type(size_t index)
 	if (std::holds_alternative<BalanceBoardData>(state.m_extension))
 	{
 		state.ir_camera.mode = kIRDisabled;
-		cemuLog_logDebug(LogType::Force, "Setting report type for Balance Board to {}", kDataCoreExt8);
+		cemuLog_log(LogType::Force, "Setting report type for Balance Board to {}", kDataCoreExt8);
 		send_packet(index, {kType, 0x04, kDataCoreExt8});
 		return;
 	}
@@ -1158,14 +1190,8 @@ void WiimoteControllerProvider::send_packet(size_t index, std::vector<uint8> dat
 {
 	cemu_assert(data.size() > 1);
 
-	std::shared_lock device_lock(m_device_mutex);
-	if (index >= m_wiimotes.size())
-		return;
-
-	device_lock.unlock();
-
 	std::unique_lock lock(m_writer_mutex);
-	m_write_queue.emplace_back(index, data);
+	m_write_queue.emplace_back(index, std::move(data));
 	m_writer_cond.notify_one();
 }
 

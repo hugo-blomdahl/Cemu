@@ -16,6 +16,7 @@
 #include "Cemu/ncrypto/ncrypto.h"
 #include "wxgui/input/HotkeySettings.h"
 #include "wxgui/debugger/DebuggerWindow2.h"
+#include "Common/FileStream.h"
 #include <wx/language.h>
 
 #if ( BOOST_OS_LINUX || BOOST_OS_BSD ) && HAS_WAYLAND
@@ -561,8 +562,9 @@ bool CemuApp::CreateDefaultMLCFiles(const fs::path& mlc)
 {
 	auto CreateDirectoriesIfNotExist = [](const fs::path& path)
 	{
+		fs::path ciPath = FileStream::findPathCI(path);
 		std::error_code ec;
-		if (!fs::exists(path, ec))
+		if (!fs::exists(ciPath, ec))
 			return fs::create_directories(path, ec);
 		return true;
 	};
@@ -587,8 +589,8 @@ bool CemuApp::CreateDefaultMLCFiles(const fs::path& mlc)
 	// create sys/usr folder in mlc01
 	try
 	{
-		const auto langDir = fs::path(mlc).append("sys/title/0005001b/1005c000/content");
-		auto langFile = fs::path(langDir).append("language.txt");
+		const auto langDir = FileStream::findPathCI(fs::path(mlc).append("sys/title/0005001b/1005c000/content"));
+		auto langFile = FileStream::findPathCI(fs::path(langDir).append("language.txt"));
 		if (!fs::exists(langFile))
 		{
 			std::ofstream file(langFile);

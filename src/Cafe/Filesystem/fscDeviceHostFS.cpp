@@ -203,11 +203,12 @@ FSCVirtualFile* FSCVirtualFile_Host::OpenFile(const fs::path& path, FSC_ACCESS_F
 	if (HAS_FLAG(accessFlags, FSC_ACCESS_FLAG::OPEN_DIR))
 	{
 		std::error_code ec;
-		bool isExistingDir = fs::is_directory(path, ec);
+		fs::path ciPath = FileStream::findPathCI(path);
+		bool isExistingDir = fs::is_directory(ciPath, ec);
 		if (isExistingDir)
 		{
 			FSCVirtualFile_Host* vf = new FSCVirtualFile_Host(FSC_TYPE_DIRECTORY);
-			vf->m_path.reset(new std::filesystem::path(path));
+			vf->m_path.reset(new std::filesystem::path(ciPath));
 			fscStatus = FSC_STATUS_OK;
 			return vf;
 		}
@@ -232,9 +233,10 @@ public:
 	bool fscDeviceCreateDir(std::string_view path, void* ctx, sint32* fscStatus) override
 	{
 		fs::path dirPath = _utf8ToPath(path);
-		if (fs::exists(dirPath))
+		fs::path ciPath = FileStream::findPathCI(dirPath);
+		if (fs::exists(ciPath))
 		{
-			if (!fs::is_directory(dirPath))
+			if (!fs::is_directory(ciPath))
 				cemuLog_log(LogType::Force, "CreateDir: {} already exists but is not a directory", path);
 			*fscStatus = FSC_STATUS_ALREADY_EXISTS;
 			return false;

@@ -64,6 +64,7 @@ public:
 private:
 	size_t m_index;
 	size_t m_player_index = 0;
+	bool m_led_set = false;
 	uint32 m_packet_delay = WiimoteControllerProvider::kDefaultPacketDelay;
 };
 

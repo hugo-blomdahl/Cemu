@@ -118,7 +118,12 @@ void WiimoteController::load(const pugi::xml_node& node)
 	base_type::load(node);
 
 	if (const auto value = node.child("device_type"))
+	{
 		m_device_type = ConvertString<WPADDeviceType>(value.child_value());
+		if ((int)m_device_type == 3)
+			m_device_type = kWAPDevBalanceChecker;
+		m_data_format = get_default_data_format();
+	}
 }
 
 void WiimoteController::save(pugi::xml_node& node)

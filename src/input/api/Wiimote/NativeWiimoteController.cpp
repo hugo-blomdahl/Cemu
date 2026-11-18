@@ -28,9 +28,6 @@ void NativeWiimoteController::load(const pugi::xml_node& node)
 
 bool NativeWiimoteController::connect()
 {
-	if (is_connected())
-		return true;
-
 	if (!m_provider->is_registered_device(m_index))
 	{
 		m_provider->get_controllers();
@@ -39,6 +36,7 @@ bool NativeWiimoteController::connect()
 	if (m_provider->is_connected(m_index))
 	{
 		m_provider->set_packet_delay(m_index, m_packet_delay);
+		m_led_set = true;
 		m_provider->set_led(m_index, m_player_index);
 		return true;
 	}
@@ -51,16 +49,26 @@ bool NativeWiimoteController::is_connected()
 	if (m_provider->is_connected(m_index))
 	{
 		m_provider->set_packet_delay(m_index, m_packet_delay);
+		if (!m_led_set)
+		{
+			m_led_set = true;
+			m_provider->set_led(m_index, m_player_index);
+		}
 		return true;
 	}
 
+	m_led_set = false;
 	return false;
 }
 
 void NativeWiimoteController::set_player_index(size_t player_index)
 {
 	m_player_index = player_index;
-	m_provider->set_led(m_index, m_player_index);
+	if (m_provider->is_connected(m_index))
+	{
+		m_led_set = true;
+		m_provider->set_led(m_index, m_player_index);
+	}
 }
 
 NativeWiimoteController::Extension NativeWiimoteController::get_extension() const
