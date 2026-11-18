@@ -179,6 +179,8 @@ void padscoreExport_WPADRead(PPCInterpreter_t* hCPU)
 		if(const auto controller = InputManager::instance().get_wpad_controller(channel) )
 		{
 			controller->WPADRead(wpadStatus);
+			osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+			return;
 		}
 	}
 	else
@@ -311,8 +313,38 @@ void padscoreExport_KPADGetUnifiedWpadStatus(PPCInterpreter_t* hCPU)
 				controller->WPADRead(&status->u.core);
 				break;
 			}
+			case kDataFormat_FREESTYLE:
+			case kDataFormat_FREESTYLE_ACC:
+			case kDataFormat_FREESTYLE_ACC_DPD:
+			{
+				status->fmt = controller->get_data_format();
+				controller->WPADRead((WPADStatus_t*)&status->u.fs);
+				break;
+			}
+			case kDataFormat_CLASSIC:
+			case kDataFormat_CLASSIC_ACC:
+			case kDataFormat_CLASSIC_ACC_DPD:
+			{
+				status->fmt = controller->get_data_format();
+				controller->WPADRead((WPADStatus_t*)&status->u.cl);
+				break;
+			}
+			case kDataFormat_BALANCE_CHECKER:
+			{
+				status->fmt = controller->get_data_format();
+				controller->WPADRead((WPADStatus_t*)&status->u.bl);
+				break;
+			}
+			case kDataFormat_URCC:
+			{
+				status->fmt = controller->get_data_format();
+				controller->WPADRead((WPADStatus_t*)&status->u.core);
+				break;
+			}
 			default:
-				debugBreakpoint();
+				status->fmt = controller->get_data_format();
+				controller->WPADRead(&status->u.core);
+				break;
 			}
 		}
 		else

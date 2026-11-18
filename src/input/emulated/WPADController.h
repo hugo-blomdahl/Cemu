@@ -11,6 +11,7 @@ enum WPADDeviceType
 	kWAPDevCore = 0,
 	kWAPDevFreestyle = 1,
 	kWAPDevClassic = 2,
+	kWAPDevBalanceChecker = 3,
 	kWAPDevMPLS = 5,
 	kWAPDevMPLSFreeStyle = 6,
 	kWAPDevMPLSClassic = 7,

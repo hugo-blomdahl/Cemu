@@ -8,6 +8,23 @@ WiimoteController::WiimoteController(size_t player_index)
 {
 }
 
+WPADDeviceType WiimoteController::get_device_type() const
+{
+#if HAS_WIIMOTE
+	std::shared_lock lock(m_mutex);
+	for (const auto& controller : m_controllers)
+	{
+		if (controller && controller->api() == InputAPI::Wiimote)
+		{
+			auto native = static_cast<NativeWiimoteController*>(controller.get());
+			if (native->get_extension() == NativeWiimoteController::BalanceBoard)
+				return kWAPDevBalanceChecker;
+		}
+	}
+#endif
+	return m_device_type;
+}
+
 void WiimoteController::set_device_type(WPADDeviceType device_type)
 {
 	m_device_type = device_type;

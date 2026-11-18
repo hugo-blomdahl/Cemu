@@ -65,7 +65,7 @@ public:
 		}ir_camera{};
 
 		std::optional<MotionPlusData> m_motion_plus;
-		std::variant<std::monostate, NunchuckData, ClassicData> m_extension{};
+		std::variant<std::monostate, NunchuckData, ClassicData, BalanceBoardData> m_extension{};
 	};
 	WiimoteState get_state(size_t index);
 	
@@ -121,6 +121,7 @@ private:
 	void rotate_ir(WiimoteState& wiimote_state);
 	void calculate_ir_position(WiimoteState& wiimote_state);
 	int parse_ir(WiimoteState& wiimote_state, const uint8* data);
+	void parse_extension_8(WiimoteState& state, const uint8* data);
 
 	void request_extension(size_t index);
 	void detect_motion_plus(size_t index);

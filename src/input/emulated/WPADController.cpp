@@ -5,6 +5,10 @@
 #include "input/emulated/ProController.h"
 #include "input/emulated/WiimoteController.h"
 
+#if HAS_WIIMOTE
+#include "input/api/Wiimote/NativeWiimoteController.h"
+#endif
+
 WPADController::WPADController(size_t player_index, WPADDataFormat data_format)
 	: EmulatedController(player_index), m_data_format(data_format)
 {
@@ -20,6 +24,8 @@ WPADDataFormat WPADController::get_default_data_format() const
 		return kDataFormat_FREESTYLE_ACC;
 	case kWAPDevClassic:
 		return kDataFormat_CLASSIC;
+	case kWAPDevBalanceChecker:
+		return kDataFormat_BALANCE_CHECKER;
 	case kWAPDevMPLS:
 		return kDataFormat_MPLS;
 	case kWAPDevMPLSFreeStyle:
@@ -140,7 +146,59 @@ void WPADController::WPADRead(WPADStatus_t* status)
 	case kDataFormat_BALANCE_CHECKER:
 	{
 		WPADBLStatus_t* ex_status = (WPADBLStatus_t*)status;
-		// TODO
+		memset(ex_status, 0x00, sizeof(*ex_status));
+		ex_status->button = button;
+
+#if HAS_WIIMOTE
+		BalanceBoardData bb_data{};
+		bool has_bb = false;
+		for (const auto& controller : m_controllers)
+		{
+			if (controller && controller->api() == InputAPI::Wiimote)
+			{
+				auto native = static_cast<NativeWiimoteController*>(controller.get());
+				if (native->get_balance_board_data(bb_data))
+				{
+					has_bb = true;
+					break;
+				}
+			}
+		}
+
+		if (has_bb)
+		{
+			ex_status->press[0] = bb_data.raw[0];
+			ex_status->press[1] = bb_data.raw[1];
+			ex_status->press[2] = bb_data.raw[2];
+			ex_status->press[3] = bb_data.raw[3];
+			ex_status->temp = bb_data.temp;
+			ex_status->battery = bb_data.battery;
+		}
+		else
+#endif
+		{
+			auto axis = get_axis();
+			if (is_mapping_down(kWPADButton_A) || axis.x != 0.0f || axis.y != 0.0f)
+			{
+				float tr = 15.0f * (1.0f + axis.x * 0.5f + axis.y * 0.5f);
+				float br = 15.0f * (1.0f + axis.x * 0.5f - axis.y * 0.5f);
+				float tl = 15.0f * (1.0f - axis.x * 0.5f + axis.y * 0.5f);
+				float bl = 15.0f * (1.0f - axis.x * 0.5f - axis.y * 0.5f);
+				ex_status->press[0] = (uint16)(400 + std::max(0.0f, tr) * 94.0f);
+				ex_status->press[1] = (uint16)(400 + std::max(0.0f, br) * 94.0f);
+				ex_status->press[2] = (uint16)(400 + std::max(0.0f, tl) * 94.0f);
+				ex_status->press[3] = (uint16)(400 + std::max(0.0f, bl) * 94.0f);
+			}
+			else
+			{
+				ex_status->press[0] = 400;
+				ex_status->press[1] = 400;
+				ex_status->press[2] = 400;
+				ex_status->press[3] = 400;
+			}
+			ex_status->temp = 20;
+			ex_status->battery = 0xff;
+		}
 		break;
 	}
 	case kDataFormat_MPLS:

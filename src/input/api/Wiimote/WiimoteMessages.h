@@ -51,7 +51,8 @@ enum ExtensionType : uint64
 	kExtensionDrawsome = 0xFF00A4200013,
 	kExtensionGuitar = 0x0000A4200103,
 	kExtensionDrums = 0x0100A4200103,
-	kExtensionBalanceBoard = 0x2A2C,
+	kExtensionBalanceBoard = 0x0000A4200402ULL,
+	kExtensionBalanceBoardEncrypted = 0x2A2C,
 
 	kExtensionMotionPlusInactive = 0xa4200005,
 	kExtensionMotionPlus = 0xa6200005,
@@ -242,4 +243,21 @@ struct ClassicData
 	glm::vec2 trigger{};
 	glm::vec<2, uint8> raw_trigger{};
 	uint16 buttons = 0;
+};
+
+struct BalanceBoardCalibration
+{
+	// 4 sensors: 0=TopRight, 1=BottomRight, 2=TopLeft, 3=BottomLeft
+	uint16 zero[4]{ 400, 400, 400, 400 };
+	uint16 kg17[4]{ 2000, 2000, 2000, 2000 };
+	uint16 kg34[4]{ 3600, 3600, 3600, 3600 };
+};
+
+struct BalanceBoardData
+{
+	uint16 raw[4]{ 400, 400, 400, 400 };
+	float kg[4]{ 0.0f, 0.0f, 0.0f, 0.0f };
+	BalanceBoardCalibration calibration{};
+	sint8 temp = 20;
+	uint8 battery = 0xff;
 };

@@ -15,6 +15,7 @@ public:
 		Nunchuck,
 		Classic,
 		MotionPlus,
+		BalanceBoard,
 	};
 	
 	std::string_view api_name() const override
@@ -34,6 +35,7 @@ public:
 
 	Extension get_extension() const;
 	bool is_mpls_attached() const;
+	bool get_balance_board_data(BalanceBoardData& out) const;
 
 	ControllerState raw_state() override;
 
