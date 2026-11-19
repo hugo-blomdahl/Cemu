@@ -75,11 +75,12 @@ void WPADController::WPADRead(WPADStatus_t* status)
 {
 	controllers_update_states();
 	uint32 button = 0;
+	const WPADDataFormat format = get_data_format();
 	for (uint32 i = 1; i < get_highest_mapping_id(); ++i)
 	{
 		if (is_mapping_down(i))
 		{
-			const uint32 value = get_emulated_button_flag(m_data_format, i);
+			const uint32 value = get_emulated_button_flag(format, i);
 			button |= value;
 		}
 	}
@@ -88,7 +89,7 @@ void WPADController::WPADRead(WPADStatus_t* status)
 
 	// todo fill position api from wiimote
 
-	switch (m_data_format)
+	switch (format)
 	{
 	case kDataFormat_CORE:
 	case kDataFormat_CORE_ACC:
@@ -247,11 +248,12 @@ void WPADController::KPADRead(KPADStatus_t& status, const BtnRepeat& repeat)
 	}
 
 	controllers_update_states();
+	const WPADDataFormat format = get_data_format();
 	for (uint32 i = 1; i < get_highest_mapping_id(); ++i)
 	{
 		if (is_mapping_down(i))
 		{
-			const uint32 value = get_emulated_button_flag(m_data_format, i);
+			const uint32 value = get_emulated_button_flag(format, i);
 			*hold |= value;
 		}
 	}

@@ -199,7 +199,7 @@ void padscoreExport_WPADRead(PPCInterpreter_t* hCPU)
 			if (controller->is_connected())
 			{
 				controller->WPADRead(wpadStatus);
-				cemuLog_log(LogType::Force, "WPADRead({}) -> dev: {}, err: {}", channel, wpadStatus->dev, wpadStatus->err);
+				cemuLog_log(LogType::InputAPI, "WPADRead({}) -> dev: {}, err: {}", channel, wpadStatus->dev, wpadStatus->err);
 				osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
 				return;
 			}
@@ -338,28 +338,6 @@ void padscoreExport_WPADRegisterBLCWorkarea(PPCInterpreter_t* hCPU)
 	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
 }
 
-void padscoreExport_WPADEnableWBC(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	ppcDefineParamMPTR(status_ptr, 1);
-	cemuLog_log(LogType::Force, "WPADEnableWBC({}, 0x{:08x})", channel, status_ptr);
-
-	uint32 target_channel = (channel < InputManager::kMaxWPADControllers) ? channel : 3;
-	if (const auto controller = InputManager::instance().get_wpad_controller(target_channel))
-	{
-		controller->set_data_format(kDataFormat_BALANCE_CHECKER);
-	}
-	padscore::g_padscore.wbc_enabled = true;
-	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
-}
-
-void padscoreExport_WBCSetupCalibration(PPCInterpreter_t* hCPU)
-{
-	cemuLog_log(LogType::Force, "WBCSetupCalibration()");
-	padscore::g_padscore.wbc_calibration_setup = true;
-	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
-}
-
 static std::shared_ptr<WPADController> get_active_balance_board(uint32 prefer_channel = 3)
 {
 	if (prefer_channel < InputManager::kMaxWPADControllers)
@@ -381,19 +359,78 @@ static std::shared_ptr<WPADController> get_active_balance_board(uint32 prefer_ch
 	return InputManager::instance().get_wpad_controller(prefer_channel);
 }
 
-void padscoreExport_WBCGetCalibrationStatus(PPCInterpreter_t* hCPU)
+static double calculate_sensor_weight_kg(uint16 raw, double zero, uint16 kg17, uint16 kg34)
+{
+	if (zero <= 0.0)
+		zero = 400.0;
+
+	if ((double)raw <= zero)
+		return 0.0;
+
+	if ((double)raw < (double)kg17)
+	{
+		double span = (double)kg17 - zero;
+		if (span <= 1.0) span = 1.0;
+		return 17.0 * ((double)raw - zero) / span;
+	}
+	else
+	{
+		double span = (double)kg34 - (double)kg17;
+		if (span <= 1.0) span = 1.0;
+		return 17.0 + 17.0 * ((double)raw - (double)kg17) / span;
+	}
+}
+
+void padscoreExport_WPADEnableWBC(PPCInterpreter_t* hCPU)
 {
 	ppcDefineParamU32(channel, 0);
-	ppcDefineParamMPTR(workarea, 1);
-	cemuLog_log(LogType::Force, "WBCGetCalibrationStatus({}, 0x{:08x})", channel, workarea);
+	ppcDefineParamMPTR(status_ptr, 1);
+	cemuLog_log(LogType::InputAPI, "WPADEnableWBC({}, 0x{:08x})", channel, status_ptr);
+
+	// Activate BALANCE_CHECKER format on the Balance Board controller
+	if (const auto bb = get_active_balance_board(3))
+	{
+		bb->set_data_format(kDataFormat_BALANCE_CHECKER);
+	}
+	if (channel < InputManager::kMaxWPADControllers)
+	{
+		if (const auto c = InputManager::instance().get_wpad_controller(channel))
+			c->set_data_format(kDataFormat_BALANCE_CHECKER);
+	}
+	padscore::g_padscore.wbc_enabled = true;
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+void padscoreExport_WBCSetupCalibration(PPCInterpreter_t* hCPU)
+{
+	cemuLog_log(LogType::InputAPI, "WBCSetupCalibration()");
+	padscore::g_padscore.wbc_calibration_setup = true;
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+void padscoreExport_WBCGetCalibrationStatus(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamU32(param0, 0);
+	ppcDefineParamMPTR(param1, 1);
+	cemuLog_log(LogType::InputAPI, "WBCGetCalibrationStatus(0x{:08x}, 0x{:08x})", param0, param1);
 
 	sint32 status = 0;
-	if (const auto controller = get_active_balance_board(channel))
+	if (const auto controller = get_active_balance_board(param0))
 	{
 		if (controller->is_connected())
 			status = 1;
 	}
-	cemuLog_log(LogType::Force, "WBCGetCalibrationStatus({}) -> {}", channel, status);
+	if (param0 >= 0x00100000)
+	{
+		uint32be* ptr = (uint32be*)memory_getPointerFromVirtualOffsetAllowNull(param0);
+		if (ptr) *ptr = 1;
+	}
+	if (param1 >= 0x00100000)
+	{
+		uint32be* ptr = (uint32be*)memory_getPointerFromVirtualOffsetAllowNull(param1);
+		if (ptr) *ptr = 1;
+	}
+	cemuLog_log(LogType::InputAPI, "WBCGetCalibrationStatus({}) -> {}", param0, status);
 	osLib_returnFromFunction(hCPU, status);
 }
 
@@ -405,7 +442,7 @@ void padscoreExport_WPADGetBLCalibration(PPCInterpreter_t* hCPU)
 	ppcDefineParamU32(flags, 3);
 	ppcDefineParamMPTR(callbackFunc, 4);
 
-	cemuLog_log(LogType::Force, "WPADGetBLCalibration({}, buffer=0x{:08x}, size={}, callback=0x{:08x})",
+	cemuLog_log(LogType::InputAPI, "WPADGetBLCalibration({}, buffer=0x{:08x}, size={}, callback=0x{:08x})",
 		channel, memory_getVirtualOffsetFromPointer(buffer), size, callbackFunc);
 
 	if (buffer && size >= 24)
@@ -443,7 +480,7 @@ void padscoreExport_WPADGetBLCalibration(PPCInterpreter_t* hCPU)
 				cal_out[8 + i] = 3600;
 			}
 		}
-		cemuLog_log(LogType::Force, "WPADGetBLCalibration filled: TR 0kg={}, 17kg={}, 34kg={}",
+		cemuLog_log(LogType::InputAPI, "WPADGetBLCalibration filled: TR 0kg={}, 17kg={}, 34kg={}",
 			cal_out[0].value(), cal_out[4].value(), cal_out[8].value());
 	}
 
@@ -470,17 +507,21 @@ void padscoreExport_WBCRead(PPCInterpreter_t* hCPU)
 		BalanceBoardData bb_data{};
 		controller->get_balance_board_data(bb_data);
 
-		if (weights && count >= 4)
+		if (weights)
 		{
 			for (uint32 i = 0; i < 4; ++i)
 			{
-				double w = (double)bb_data.kg[i] - padscore::g_padscore.wbc_zero_point[i];
-				if (w < 0.0) w = 0.0;
-				weights[i] = w;
+				double zero = padscore::g_padscore.wbc_zero_point[i];
+				if (zero <= 0.0)
+					zero = (double)bb_data.calibration.zero[i];
+
+				weights[i] = calculate_sensor_weight_kg(
+					bb_data.raw[i], zero,
+					bb_data.calibration.kg17[i], bb_data.calibration.kg34[i]);
 			}
 		}
 
-		cemuLog_log(LogType::InputAPI, "WBCRead() -> 1 (TR={:.2f}, BR={:.2f}, TL={:.2f}, BL={:.2f})",
+		cemuLog_log(LogType::InputAPI, "WBCRead() -> 1 (TR={:.2f}kg, BR={:.2f}kg, TL={:.2f}kg, BL={:.2f}kg)",
 			weights ? (double)weights[0] : 0.0,
 			weights ? (double)weights[1] : 0.0,
 			weights ? (double)weights[2] : 0.0,
@@ -501,33 +542,55 @@ void padscoreExport_WBCRead(PPCInterpreter_t* hCPU)
 
 void padscoreExport_WBCGetTGCWeight(PPCInterpreter_t* hCPU)
 {
-	ppcDefineParamPtr(weight_out, float64be, 0);
-	ppcDefineParamPtr(weights_in, float64be, 1);
+	const uint32 r3 = hCPU->gpr[3];
+	const uint32 r4 = hCPU->gpr[4];
 
-	double total = 0.0;
-	if (weights_in)
+	// Calculate live total weight from balance board hardware sensors
+	BalanceBoardData bb_data{};
+	double live_total = 0.0;
+	if (const auto controller = get_active_balance_board(3))
 	{
-		total = (double)weights_in[0] + (double)weights_in[1] + (double)weights_in[2] + (double)weights_in[3];
-	}
-	else
-	{
-		BalanceBoardData bb_data{};
-		if (const auto controller = get_active_balance_board(3))
+		controller->get_balance_board_data(bb_data);
+		for (int i = 0; i < 4; ++i)
 		{
-			controller->get_balance_board_data(bb_data);
-			for (int i = 0; i < 4; ++i)
-			{
-				double w = (double)bb_data.kg[i] - padscore::g_padscore.wbc_zero_point[i];
-				if (w < 0.0) w = 0.0;
-				total += w;
-			}
+			double zero = padscore::g_padscore.wbc_zero_point[i];
+			if (zero <= 0.0)
+				zero = (double)bb_data.calibration.zero[i];
+
+			live_total += calculate_sensor_weight_kg(
+				bb_data.raw[i], zero,
+				bb_data.calibration.kg17[i], bb_data.calibration.kg34[i]);
 		}
 	}
 
-	if (weight_out)
-		*weight_out = total;
+	// r3 is double* pWeight. r4 is const WPADBLStatus_t* status (input only, NEVER WRITE TO r4!).
+	float64be* pWeight = (r3 >= 0x00100000) ? (float64be*)memory_getPointerFromVirtualOffsetAllowNull(r3) : nullptr;
 
-	cemuLog_log(LogType::InputAPI, "WBCGetTGCWeight() -> {:.2f} kg", total);
+	double total = 0.0;
+	if (pWeight)
+	{
+		double existing_weight = (double)*pWeight;
+		if (std::isfinite(existing_weight) && existing_weight > 0.0)
+		{
+			total = existing_weight;
+		}
+		else
+		{
+			total = live_total;
+			*pWeight = total;
+		}
+	}
+	else
+	{
+		total = live_total;
+	}
+
+	// Also set floating point return register f1 in case caller returns f1 directly
+	hCPU->fpr[1].fpr = total;
+
+	cemuLog_log(LogType::InputAPI, "WBCGetTGCWeight() -> {:.2f} kg (live: {:.2f} kg, *pWeight: {:.2f} kg)",
+		total, live_total, pWeight ? (double)*pWeight : 0.0);
+
 	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
 }
 
@@ -535,7 +598,12 @@ void padscoreExport_WBCGetBatteryLevel(PPCInterpreter_t* hCPU)
 {
 	ppcDefineParamU32(val, 0);
 	uint32 level = (uint32)WPADBatteryLevel::FULL;
-	if (val > 4)
+	if (val >= 0x00100000)
+	{
+		uint32be* ptr = (uint32be*)memory_getPointerFromVirtualOffsetAllowNull(val);
+		if (ptr) *ptr = level;
+	}
+	else if (val > 4)
 	{
 		if (val >= 0xC0) level = 4;
 		else if (val >= 0x80) level = 3;
@@ -551,7 +619,7 @@ void padscoreExport_WBCSetZEROPoint(PPCInterpreter_t* hCPU)
 {
 	ppcDefineParamPtr(zero_points, float64be, 0);
 	ppcDefineParamU32(count, 1);
-	cemuLog_log(LogType::Force, "WBCSetZEROPoint(count={})", count);
+	cemuLog_log(LogType::InputAPI, "WBCSetZEROPoint(count={})", count);
 
 	if (zero_points && count >= 4)
 	{

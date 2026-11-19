@@ -117,7 +117,7 @@ public:
 
 	WPADDataFormat get_data_format() const
 	{
-		if (m_data_format == kDataFormat_CORE_ACC_DPD && get_device_type() == kWAPDevBalanceChecker)
+		if (get_device_type() == kWAPDevBalanceChecker)
 			return kDataFormat_BALANCE_CHECKER;
 		return m_data_format;
 	}
