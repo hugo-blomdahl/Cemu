@@ -1,7 +1,7 @@
 #include "Common/unix/FileStream_unix.h"
 #include <cstdarg>
 
-fs::path findPathCI(const fs::path& path)
+fs::path FileStream::findPathCI(const fs::path& path)
 {
 	if (fs::exists(path)) return path;
 
@@ -14,10 +14,38 @@ fs::path findPathCI(const fs::path& path)
 
 	std::error_code listErr;
 	for (auto&& dirEntry : fs::directory_iterator(parentPath, listErr))
+	{
 		if (boost::iequals(dirEntry.path().filename().string(), fName.string()))
 			return dirEntry;
+	}
+
+	// If not found in parentPath, search sibling directories of parentPath that match parentPath's name case-insensitively.
+	// This handles situations where shadowed/duplicate directories with different casing exist on Linux.
+	fs::path grandParent = parentPath.parent_path();
+	if (!grandParent.empty() && fs::exists(grandParent))
+	{
+		std::string parentName = parentPath.filename().string();
+		for (auto&& siblingEntry : fs::directory_iterator(grandParent, listErr))
+		{
+			if (siblingEntry.is_directory() &&
+				siblingEntry.path() != parentPath &&
+				boost::iequals(siblingEntry.path().filename().string(), parentName))
+			{
+				for (auto&& dirEntry : fs::directory_iterator(siblingEntry.path(), listErr))
+				{
+					if (boost::iequals(dirEntry.path().filename().string(), fName.string()))
+						return dirEntry;
+				}
+			}
+		}
+	}
 
 	return parentPath / fName;
+}
+
+fs::path findPathCI(const fs::path& path)
+{
+	return FileStream::findPathCI(path);
 }
 
 FileStream* FileStream::openFile(std::string_view path)

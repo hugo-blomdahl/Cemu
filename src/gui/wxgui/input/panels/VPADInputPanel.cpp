@@ -201,6 +201,9 @@ void VPADInputPanel::load_controller(const EmulatedControllerPtr& controller)
 {
 	InputPanel::load_controller(controller);
 
-	const bool isToggle = static_cast<VPADController*>(controller.get())->is_screen_active_toggle();
-	m_togglePadViewCheckBox->SetValue(isToggle);
+	if (const auto vpad = std::dynamic_pointer_cast<VPADController>(controller))
+	{
+		const bool isToggle = vpad->is_screen_active_toggle();
+		m_togglePadViewCheckBox->SetValue(isToggle);
+	}
 }

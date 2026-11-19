@@ -15,6 +15,8 @@ class FileStream
 	// helper function to load a file into memory
 	static std::optional<std::vector<uint8>> LoadIntoMemory(const fs::path& path);
 
+	static fs::path findPathCI(const fs::path& path) { return path; }
+
 	// size and seek
 	void SetPosition(uint64 pos);
 

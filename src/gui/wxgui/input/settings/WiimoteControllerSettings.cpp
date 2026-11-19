@@ -296,6 +296,11 @@ void WiimoteControllerSettings::on_timer(wxTimerEvent& event)
 		m_nunchuck_settings->Disable();
 		m_classic_settings->Enable();
 		break;
+	case NativeWiimoteController::BalanceBoard:
+		label = _("Balance Board");
+		m_nunchuck_settings->Disable();
+		m_classic_settings->Disable();
+		break;
 	default: 
 		m_nunchuck_settings->Disable();
 		m_classic_settings->Disable();

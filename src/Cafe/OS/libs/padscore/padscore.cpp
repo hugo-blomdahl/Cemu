@@ -6,6 +6,7 @@
 #include "Cafe/OS/libs/coreinit/coreinit_SystemInfo.h"
 #include "WindowSystem.h"
 #include "input/InputManager.h"
+#include "input/api/Wiimote/WiimoteMessages.h"
 
 constinit COSStaticData s_padscoreStaticData;
 
@@ -68,12 +69,18 @@ namespace padscore
 			MEMPTR<void> dpd_callback;
 			bool dpd_enabled = true;
 
-			bool disconnectCalled = false;
+			bool callback_initialized = false;
+			bool last_connected_state = false;
 
 			BtnRepeat btn_repeat{};
 		} controller_data[InputManager::kMaxWPADControllers] = {};
 
 		int max_controllers = kWPADMaxControllers; // max bt controllers?
+
+		bool wbc_enabled = false;
+		bool wbc_calibration_setup = false;
+		double wbc_zero_point[4] = { 0.0, 0.0, 0.0, 0.0 };
+		MEMPTR<void> blc_workarea{};
 	} g_padscore;
 }
 
@@ -102,18 +109,22 @@ void padscoreExport_WPADProbe(PPCInterpreter_t* hCPU)
 
 	if(const auto controller = InputManager::instance().get_wpad_controller(channel))
 	{
-		if(type)
-			*type = controller->get_device_type();
+		if (controller->is_connected())
+		{
+			if(type)
+				*type = controller->get_device_type();
 
-		osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+			cemuLog_log(LogType::Force, "WPADProbe({}) -> devType: {}", channel, controller->get_device_type());
+			osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+			return;
+		}
 	}
-	else
-	{
-		if(type)
-			*type = 253;
 
-		osLib_returnFromFunction(hCPU, WPAD_ERR_NO_CONTROLLER);
-	}
+	if(type)
+		*type = 253;
+
+	cemuLog_log(LogType::Force, "WPADProbe({}) -> NO_CONTROLLER", channel);
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NO_CONTROLLER);
 }
 
 typedef struct
@@ -136,25 +147,32 @@ void padscoreExport_WPADGetInfoAsync(PPCInterpreter_t* hCPU)
 	ppcDefineParamU32(channel, 0);
 	ppcDefineParamStructPtr(wpadInfo, WPADInfo_t, 1);
 	ppcDefineParamMPTR(callbackFunc, 2);
-	cemuLog_log(LogType::InputAPI, "WPADGetInfoAsync({}, 0x{:08x}, 0x{:08x})", channel, memory_getVirtualOffsetFromPointer(wpadInfo), callbackFunc);
+	cemuLog_log(LogType::Force, "WPADGetInfoAsync({}, 0x{:08x}, 0x{:08x})", channel, memory_getVirtualOffsetFromPointer(wpadInfo), callbackFunc);
 
 	if (channel < InputManager::kMaxWPADControllers)
 	{
 		if (const auto controller = InputManager::instance().get_wpad_controller(channel))
 		{
-			wpadInfo->dpd = FALSE;
-			wpadInfo->speaker = FALSE;
-			wpadInfo->attach = FALSE;
-			wpadInfo->lowBat = FALSE;
-			wpadInfo->nearempty = FALSE;
-			wpadInfo->batteryLevel = WPADBatteryLevel::FULL;
-			wpadInfo->led = WPADLed::CHAN0;
+			if (controller->is_connected())
+			{
+				wpadInfo->dpd = FALSE;
+				wpadInfo->speaker = FALSE;
+				const auto devType = controller->get_device_type();
+				wpadInfo->attach = (devType == kWAPDevFreestyle || devType == kWAPDevClassic ||
+				                    devType == kWAPDevMPLSFreeStyle || devType == kWAPDevMPLSClassic);
+				wpadInfo->lowBat = FALSE;
+				wpadInfo->nearempty = FALSE;
+				wpadInfo->batteryLevel = WPADBatteryLevel::FULL;
+				wpadInfo->led = (WPADLed)(1 << (channel % 4));
 
-			if(callbackFunc != MPTR_NULL)
-				coreinitAsyncCallback_add(callbackFunc, 2, channel, (uint32)KPAD_ERROR::NONE);
+				cemuLog_log(LogType::Force, "WPADGetInfoAsync({}) -> devType: {}, attach: {}", channel, controller->get_device_type(), (bool)wpadInfo->attach);
 
-			osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
-			return;
+				if(callbackFunc != MPTR_NULL)
+					coreinitAsyncCallback_add(callbackFunc, 2, channel, (uint32)KPAD_ERROR::NONE);
+
+				osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+				return;
+			}
 		}
 	}
 	else
@@ -172,18 +190,29 @@ void padscoreExport_WPADRead(PPCInterpreter_t* hCPU)
 {
 	ppcDefineParamU32(channel, 0);
 	ppcDefineParamPtr(wpadStatus, WPADStatus_t, 1);
-	cemuLog_log(LogType::InputAPI, "WPADRead({}, {:x})", channel, memory_getVirtualOffsetFromPointer(wpadStatus));
+	cemuLog_log(LogType::Force, "WPADRead({}, {:x})", channel, memory_getVirtualOffsetFromPointer(wpadStatus));
 
 	if (channel < InputManager::kMaxWPADControllers)
 	{
 		if(const auto controller = InputManager::instance().get_wpad_controller(channel) )
 		{
-			controller->WPADRead(wpadStatus);
+			if (controller->is_connected())
+			{
+				controller->WPADRead(wpadStatus);
+				cemuLog_log(LogType::InputAPI, "WPADRead({}) -> dev: {}, err: {}", channel, wpadStatus->dev, wpadStatus->err);
+				osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+				return;
+			}
 		}
 	}
 	else
 	{
 		debugBreakpoint();
+	}
+	if (wpadStatus)
+	{
+		wpadStatus->dev = 253;
+		wpadStatus->err = WPAD_ERR_NO_CONTROLLER;
 	}
 	osLib_returnFromFunction(hCPU, WPAD_ERR_NO_CONTROLLER);
 }
@@ -192,7 +221,7 @@ void padscoreExport_WPADSetDataFormat(PPCInterpreter_t* hCPU)
 {
 	ppcDefineParamU32(channel, 0);
 	ppcDefineParamU32(fmt, 1);
-	cemuLog_log(LogType::InputAPI, "WPADSetDataFormat({}, {})", channel, fmt);
+	cemuLog_log(LogType::Force, "WPADSetDataFormat({}, {})", channel, fmt);
 
 	if (channel < InputManager::kMaxWPADControllers)
 	{
@@ -206,7 +235,7 @@ void padscoreExport_WPADSetDataFormat(PPCInterpreter_t* hCPU)
 void padscoreExport_WPADGetDataFormat(PPCInterpreter_t* hCPU)
 {
 	ppcDefineParamU32(channel, 0);
-	cemuLog_log(LogType::InputAPI, "WPADGetDataFormat({})", channel);
+	cemuLog_log(LogType::Force, "WPADGetDataFormat({})", channel);
 
 	sint32 dataFormat = kDataFormat_CORE;
 	if (channel < InputManager::kMaxWPADControllers)
@@ -219,6 +248,7 @@ void padscoreExport_WPADGetDataFormat(PPCInterpreter_t* hCPU)
 		debugBreakpoint();
 	}
 
+	cemuLog_log(LogType::Force, "WPADGetDataFormat({}) -> fmt: {}", channel, dataFormat);
 	osLib_returnFromFunction(hCPU, dataFormat);
 }
 
@@ -226,22 +256,28 @@ void padscoreExport_WPADGetInfo(PPCInterpreter_t* hCPU)
 {
 	ppcDefineParamU32(channel, 0);
 	ppcDefineParamStructPtr(wpadInfo, WPADInfo_t, 1);
-	cemuLog_log(LogType::InputAPI, "WPADGetInfo({}, 0x{:08x})", channel, memory_getVirtualOffsetFromPointer(wpadInfo));
+	cemuLog_log(LogType::Force, "WPADGetInfo({}, 0x{:08x})", channel, memory_getVirtualOffsetFromPointer(wpadInfo));
 
 	if (channel < InputManager::kMaxWPADControllers)
 	{
 		if (const auto controller = InputManager::instance().get_wpad_controller(channel))
 		{
-			wpadInfo->dpd = FALSE;
-			wpadInfo->speaker = FALSE;
-			wpadInfo->attach = FALSE;
-			wpadInfo->lowBat = FALSE;
-			wpadInfo->nearempty = FALSE;
-			wpadInfo->batteryLevel = WPADBatteryLevel::FULL;
-			wpadInfo->led = WPADLed::CHAN0;
+			if (controller->is_connected())
+			{
+				wpadInfo->dpd = FALSE;
+				wpadInfo->speaker = FALSE;
+				const auto devType = controller->get_device_type();
+				wpadInfo->attach = (devType == kWAPDevFreestyle || devType == kWAPDevClassic ||
+				                    devType == kWAPDevMPLSFreeStyle || devType == kWAPDevMPLSClassic);
+				wpadInfo->lowBat = FALSE;
+				wpadInfo->nearempty = FALSE;
+				wpadInfo->batteryLevel = WPADBatteryLevel::FULL;
+				wpadInfo->led = (WPADLed)(1 << (channel % 4));
 
-			osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
-			return;
+				cemuLog_log(LogType::Force, "WPADGetInfo({}) -> devType: {}, attach: {}", channel, controller->get_device_type(), (bool)wpadInfo->attach);
+				osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+				return;
+			}
 		}
 	}
 	else
@@ -284,6 +320,427 @@ void padscoreExport_WPADControlMotor(PPCInterpreter_t* hCPU)
 }
 #pragma endregion
 
+#pragma region WBC / Balance Board
+
+void padscoreExport_WPADIsRegisteredBLC(PPCInterpreter_t* hCPU)
+{
+	cemuLog_log(LogType::Force, "WPADIsRegisteredBLC() -> 1");
+	// Always report registered (1) so Wii Fit U advances to the balance board connect screen
+	// rather than demanding hardware console sync button presses.
+	osLib_returnFromFunction(hCPU, 1);
+}
+
+void padscoreExport_WPADRegisterBLCWorkarea(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamMPTR(workarea, 0);
+	cemuLog_log(LogType::Force, "WPADRegisterBLCWorkarea(0x{:08x})", workarea);
+	padscore::g_padscore.blc_workarea = workarea;
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+static std::shared_ptr<WPADController> get_active_balance_board(uint32 prefer_channel = 3)
+{
+	if (prefer_channel < InputManager::kMaxWPADControllers)
+	{
+		if (const auto c = InputManager::instance().get_wpad_controller(prefer_channel))
+		{
+			if (c->get_device_type() == kWAPDevBalanceChecker)
+				return c;
+		}
+	}
+	for (size_t i = 0; i < InputManager::kMaxWPADControllers; ++i)
+	{
+		if (const auto c = InputManager::instance().get_wpad_controller(i))
+		{
+			if (c->get_device_type() == kWAPDevBalanceChecker)
+				return c;
+		}
+	}
+	return InputManager::instance().get_wpad_controller(prefer_channel);
+}
+
+static double calculate_sensor_weight_kg(uint16 raw, double zero, uint16 kg17, uint16 kg34)
+{
+	if (zero <= 0.0)
+		zero = 400.0;
+
+	if ((double)raw <= zero)
+		return 0.0;
+
+	if ((double)raw < (double)kg17)
+	{
+		double span = (double)kg17 - zero;
+		if (span <= 1.0) span = 1.0;
+		return 17.0 * ((double)raw - zero) / span;
+	}
+	else
+	{
+		double span = (double)kg34 - (double)kg17;
+		if (span <= 1.0) span = 1.0;
+		return 17.0 + 17.0 * ((double)raw - (double)kg17) / span;
+	}
+}
+
+void padscoreExport_WPADEnableWBC(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamU32(channel, 0);
+	ppcDefineParamMPTR(status_ptr, 1);
+	cemuLog_log(LogType::InputAPI, "WPADEnableWBC({}, 0x{:08x})", channel, status_ptr);
+
+	// Activate BALANCE_CHECKER format on the Balance Board controller
+	if (const auto bb = get_active_balance_board(3))
+	{
+		bb->set_data_format(kDataFormat_BALANCE_CHECKER);
+	}
+	if (channel < InputManager::kMaxWPADControllers)
+	{
+		if (const auto c = InputManager::instance().get_wpad_controller(channel))
+			c->set_data_format(kDataFormat_BALANCE_CHECKER);
+	}
+	padscore::g_padscore.wbc_enabled = true;
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+void padscoreExport_WBCSetupCalibration(PPCInterpreter_t* hCPU)
+{
+	cemuLog_log(LogType::InputAPI, "WBCSetupCalibration()");
+	padscore::g_padscore.wbc_calibration_setup = true;
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+void padscoreExport_WBCGetCalibrationStatus(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamU32(param0, 0);
+	ppcDefineParamMPTR(param1, 1);
+	cemuLog_log(LogType::InputAPI, "WBCGetCalibrationStatus(0x{:08x}, 0x{:08x})", param0, param1);
+
+	sint32 status = 0;
+	if (const auto controller = get_active_balance_board(param0))
+	{
+		if (controller->is_connected())
+			status = 1;
+	}
+	if (param0 >= 0x00100000)
+	{
+		uint32be* ptr = (uint32be*)memory_getPointerFromVirtualOffsetAllowNull(param0);
+		if (ptr) *ptr = 1;
+	}
+	if (param1 >= 0x00100000)
+	{
+		uint32be* ptr = (uint32be*)memory_getPointerFromVirtualOffsetAllowNull(param1);
+		if (ptr) *ptr = 1;
+	}
+	cemuLog_log(LogType::InputAPI, "WBCGetCalibrationStatus({}) -> {}", param0, status);
+	osLib_returnFromFunction(hCPU, status);
+}
+
+void padscoreExport_WPADGetBLCalibration(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamU32(channel, 0);
+	ppcDefineParamPtr(buffer, uint8, 1);
+	ppcDefineParamU32(size, 2);
+	ppcDefineParamU32(flags, 3);
+	ppcDefineParamMPTR(callbackFunc, 4);
+
+	cemuLog_log(LogType::InputAPI, "WPADGetBLCalibration({}, buffer=0x{:08x}, size={}, callback=0x{:08x})",
+		channel, memory_getVirtualOffsetFromPointer(buffer), size, callbackFunc);
+
+	if (buffer && size >= 24)
+	{
+		memset(buffer, 0, size);
+		BalanceBoardData bb_data{};
+		bool has_bb = false;
+		if (const auto controller = get_active_balance_board(channel))
+		{
+			has_bb = controller->get_balance_board_data(bb_data);
+		}
+
+		uint16be* cal_out = (uint16be*)buffer;
+		if (has_bb)
+		{
+			cal_out[0] = bb_data.calibration.zero[0];
+			cal_out[1] = bb_data.calibration.zero[1];
+			cal_out[2] = bb_data.calibration.zero[2];
+			cal_out[3] = bb_data.calibration.zero[3];
+			cal_out[4] = bb_data.calibration.kg17[0];
+			cal_out[5] = bb_data.calibration.kg17[1];
+			cal_out[6] = bb_data.calibration.kg17[2];
+			cal_out[7] = bb_data.calibration.kg17[3];
+			cal_out[8] = bb_data.calibration.kg34[0];
+			cal_out[9] = bb_data.calibration.kg34[1];
+			cal_out[10] = bb_data.calibration.kg34[2];
+			cal_out[11] = bb_data.calibration.kg34[3];
+		}
+		else
+		{
+			for (int i = 0; i < 4; ++i)
+			{
+				cal_out[i] = 400;
+				cal_out[4 + i] = 2000;
+				cal_out[8 + i] = 3600;
+			}
+		}
+		cemuLog_log(LogType::InputAPI, "WPADGetBLCalibration filled: TR 0kg={}, 17kg={}, 34kg={}",
+			cal_out[0].value(), cal_out[4].value(), cal_out[8].value());
+	}
+
+	if (callbackFunc != MPTR_NULL)
+		coreinitAsyncCallback_add(callbackFunc, 2, channel, (uint32)KPAD_ERROR::NONE);
+
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+void padscoreExport_WBCRead(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamPtr(status, WPADBLStatus_t, 0);
+	ppcDefineParamPtr(weights, float64be, 1);
+	ppcDefineParamU32(count, 2);
+
+	const auto controller = get_active_balance_board(3);
+	if (controller && controller->is_connected())
+	{
+		if (status)
+		{
+			controller->WPADRead((WPADStatus_t*)status);
+		}
+
+		BalanceBoardData bb_data{};
+		controller->get_balance_board_data(bb_data);
+
+		if (weights)
+		{
+			for (uint32 i = 0; i < 4; ++i)
+			{
+				double zero = padscore::g_padscore.wbc_zero_point[i];
+				if (zero <= 0.0)
+					zero = (double)bb_data.calibration.zero[i];
+
+				weights[i] = calculate_sensor_weight_kg(
+					bb_data.raw[i], zero,
+					bb_data.calibration.kg17[i], bb_data.calibration.kg34[i]);
+			}
+		}
+
+		cemuLog_log(LogType::InputAPI, "WBCRead() -> 1 (TR={:.2f}kg, BR={:.2f}kg, TL={:.2f}kg, BL={:.2f}kg)",
+			weights ? (double)weights[0] : 0.0,
+			weights ? (double)weights[1] : 0.0,
+			weights ? (double)weights[2] : 0.0,
+			weights ? (double)weights[3] : 0.0);
+
+		osLib_returnFromFunction(hCPU, 1); // 1 sample read
+		return;
+	}
+
+	if (status)
+	{
+		memset(status, 0, sizeof(*status));
+		status->dev = 253;
+		status->err = WPAD_ERR_NO_CONTROLLER;
+	}
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NO_CONTROLLER);
+}
+
+void padscoreExport_WBCGetTGCWeight(PPCInterpreter_t* hCPU)
+{
+	const uint32 r3 = hCPU->gpr[3];
+	const uint32 r4 = hCPU->gpr[4];
+
+	// Calculate live total weight from balance board hardware sensors
+	BalanceBoardData bb_data{};
+	double live_total = 0.0;
+	if (const auto controller = get_active_balance_board(3))
+	{
+		controller->get_balance_board_data(bb_data);
+		for (int i = 0; i < 4; ++i)
+		{
+			double zero = padscore::g_padscore.wbc_zero_point[i];
+			if (zero <= 0.0)
+				zero = (double)bb_data.calibration.zero[i];
+
+			live_total += calculate_sensor_weight_kg(
+				bb_data.raw[i], zero,
+				bb_data.calibration.kg17[i], bb_data.calibration.kg34[i]);
+		}
+	}
+
+	// r3 is double* pWeight. r4 is const WPADBLStatus_t* status (input only, NEVER WRITE TO r4!).
+	float64be* pWeight = (r3 >= 0x00100000) ? (float64be*)memory_getPointerFromVirtualOffsetAllowNull(r3) : nullptr;
+
+	double total = 0.0;
+	if (pWeight)
+	{
+		double existing_weight = (double)*pWeight;
+		if (std::isfinite(existing_weight) && existing_weight > 0.0)
+		{
+			total = existing_weight;
+		}
+		else
+		{
+			total = live_total;
+			*pWeight = total;
+		}
+	}
+	else
+	{
+		total = live_total;
+	}
+
+	// Also set floating point return register f1 in case caller returns f1 directly
+	hCPU->fpr[1].fpr = total;
+
+	cemuLog_log(LogType::InputAPI, "WBCGetTGCWeight() -> {:.2f} kg (live: {:.2f} kg, *pWeight: {:.2f} kg)",
+		total, live_total, pWeight ? (double)*pWeight : 0.0);
+
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+void padscoreExport_WBCGetBatteryLevel(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamU32(val, 0);
+	uint32 level = (uint32)WPADBatteryLevel::FULL;
+	if (val >= 0x00100000)
+	{
+		uint32be* ptr = (uint32be*)memory_getPointerFromVirtualOffsetAllowNull(val);
+		if (ptr) *ptr = level;
+	}
+	else if (val > 4)
+	{
+		if (val >= 0xC0) level = 4;
+		else if (val >= 0x80) level = 3;
+		else if (val >= 0x40) level = 2;
+		else if (val >= 0x20) level = 1;
+		else level = 0;
+	}
+	cemuLog_log(LogType::InputAPI, "WBCGetBatteryLevel({}) -> {}", val, level);
+	osLib_returnFromFunction(hCPU, level);
+}
+
+void padscoreExport_WBCSetZEROPoint(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamPtr(zero_points, float64be, 0);
+	ppcDefineParamU32(count, 1);
+	cemuLog_log(LogType::InputAPI, "WBCSetZEROPoint(count={})", count);
+
+	if (zero_points && count >= 4)
+	{
+		for (uint32 i = 0; i < 4; ++i)
+			padscore::g_padscore.wbc_zero_point[i] = (double)zero_points[i];
+		cemuLog_log(LogType::Force, "WBCSetZEROPoint: TR={:.2f}, BR={:.2f}, TL={:.2f}, BL={:.2f}",
+			padscore::g_padscore.wbc_zero_point[0], padscore::g_padscore.wbc_zero_point[1],
+			padscore::g_padscore.wbc_zero_point[2], padscore::g_padscore.wbc_zero_point[3]);
+	}
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+void padscoreExport_WPADControlBLC(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamU32(channel, 0);
+	ppcDefineParamU32(command, 1);
+	ppcDefineParamMPTR(callback, 2);
+	cemuLog_log(LogType::Force, "WPADControlBLC({}, {}, 0x{:08x})", channel, command, callback);
+	if (callback != MPTR_NULL)
+		coreinitAsyncCallback_add(callback, 2, channel, WPAD_ERR_NONE);
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+void padscoreExport_WPADRegisterAllocator(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamMPTR(alloc_fn, 0);
+	ppcDefineParamMPTR(free_fn, 1);
+	cemuLog_log(LogType::InputAPI, "WPADRegisterAllocator(0x{:08x}, 0x{:08x})", alloc_fn, free_fn);
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+void padscoreExport_WPADDisconnect(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamU32(channel, 0);
+	cemuLog_log(LogType::InputAPI, "WPADDisconnect({})", channel);
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+void padscoreExport_WPADSetAutoSleepTime(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamU32(minutes, 0);
+	cemuLog_log(LogType::InputAPI, "WPADSetAutoSleepTime({})", minutes);
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+void padscoreExport_WPADSetSensorBar(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamU32(pos, 0);
+	cemuLog_log(LogType::InputAPI, "WPADSetSensorBar({})", pos);
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+void padscoreExport_WPADGetSensorBarPosition(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamPtr(pos, uint32be, 0);
+	if (pos) *pos = 0;
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+void padscoreExport_WPADGetSpeakerVolume(PPCInterpreter_t* hCPU)
+{
+	osLib_returnFromFunction(hCPU, 7);
+}
+
+void padscoreExport_WPADIsMplsIntegrated(PPCInterpreter_t* hCPU)
+{
+	ppcDefineParamU32(channel, 0);
+	osLib_returnFromFunction(hCPU, 0);
+}
+
+void padscoreExport_WPADCanSendStreamData(PPCInterpreter_t* hCPU)
+{
+	osLib_returnFromFunction(hCPU, 1);
+}
+
+void padscoreExport_WPADSendStreamData(PPCInterpreter_t* hCPU)
+{
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+void padscoreExport_WPADControlSpeaker(PPCInterpreter_t* hCPU)
+{
+	osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
+}
+
+#pragma endregion
+
+#pragma region KPAD Mpls Stubs
+void padscoreExport_KPADEnableMpls(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADDisableMpls(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADEnableMplsAccRevise(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADDisableMplsAccRevise(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADEnableMplsDirRevise(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADDisableMplsDirRevise(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADEnableMplsZeroPlay(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADDisableMplsZeroPlay(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADIsEnableMplsZeroDrift(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADResetMpls(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADSetAccParam(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADSetDistParam(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADSetHoriParam(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADSetPosParam(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADSetSensorHeight(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADSetReviseMode(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADSetControlMplsCallback(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADSetMplsWorkarea(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADSetMplsDirection(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADSetMplsMagnification(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADSetMplsAccReviseParam(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADSetMplsDirReviseBase(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADSetMplsDirReviseParam(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADSetMplsZeroPlayParam(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADStartMplsCalibration(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADWorkMplsCalibration(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADDisableDPD(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADDisableMplsDpdRevise(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADEnableMplsDpdRevise(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_KPADReviseAcc(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+void padscoreExport_WENCGetEncodeData(PPCInterpreter_t* hCPU) { osLib_returnFromFunction(hCPU, 0); }
+#pragma endregion
+
 
 
 #pragma region KPAD
@@ -293,7 +750,7 @@ void padscoreExport_KPADGetUnifiedWpadStatus(PPCInterpreter_t* hCPU)
 	ppcDefineParamPtr(status, KPADUnifiedWpadStatus_t, 1);
 	ppcDefineParamU32(count, 2);
 
-	cemuLog_log(LogType::InputAPI, "KPADGetUnifiedWpadStatus({}, 0x{:08x}, 0x{:x})", channel, MEMPTR<void>(status).GetMPTR(), count);
+	cemuLog_log(LogType::Force, "KPADGetUnifiedWpadStatus({}, 0x{:08x}, 0x{:x})", channel, MEMPTR<void>(status).GetMPTR(), count);
 
 	if (channel < InputManager::kMaxWPADControllers)
 	{
@@ -311,9 +768,40 @@ void padscoreExport_KPADGetUnifiedWpadStatus(PPCInterpreter_t* hCPU)
 				controller->WPADRead(&status->u.core);
 				break;
 			}
-			default:
-				debugBreakpoint();
+			case kDataFormat_FREESTYLE:
+			case kDataFormat_FREESTYLE_ACC:
+			case kDataFormat_FREESTYLE_ACC_DPD:
+			{
+				status->fmt = controller->get_data_format();
+				controller->WPADRead((WPADStatus_t*)&status->u.fs);
+				break;
 			}
+			case kDataFormat_CLASSIC:
+			case kDataFormat_CLASSIC_ACC:
+			case kDataFormat_CLASSIC_ACC_DPD:
+			{
+				status->fmt = controller->get_data_format();
+				controller->WPADRead((WPADStatus_t*)&status->u.cl);
+				break;
+			}
+			case kDataFormat_BALANCE_CHECKER:
+			{
+				status->fmt = controller->get_data_format();
+				controller->WPADRead((WPADStatus_t*)&status->u.bl);
+				break;
+			}
+			case kDataFormat_URCC:
+			{
+				status->fmt = controller->get_data_format();
+				controller->WPADRead((WPADStatus_t*)&status->u.core);
+				break;
+			}
+			default:
+				status->fmt = controller->get_data_format();
+				controller->WPADRead(&status->u.core);
+				break;
+			}
+			cemuLog_log(LogType::Force, "KPADGetUnifiedWpadStatus({}) -> fmt: {}, dev: {}, err: {}", channel, status->fmt, status->u.core.dev, status->u.core.err);
 		}
 		else
 		{
@@ -393,7 +881,7 @@ void padscoreExport_WPADSetExtensionCallback(PPCInterpreter_t* hCPU)
 	ppcDefineParamU32(channel, 0);
 	ppcDefineParamMPTR(callback, 1);
 
-	cemuLog_log(LogType::InputAPI, "WPADSetExtensionCallback({}, 0x{:x})", channel, callback);
+	cemuLog_log(LogType::Force, "WPADSetExtensionCallback({}, 0x{:x})", channel, callback);
 
 	if (channel >= InputManager::kMaxWPADControllers)
 	{
@@ -404,6 +892,9 @@ void padscoreExport_WPADSetExtensionCallback(PPCInterpreter_t* hCPU)
 
 	const auto old_callback = padscore::g_padscore.controller_data[channel].extension_callback;
 	padscore::g_padscore.controller_data[channel].extension_callback = callback;
+	if (const auto controller = InputManager::instance().get_wpad_controller(channel))
+		controller->m_extension_status = WPADController::ConnectCallbackStatus::ReportConnect;
+
 	osLib_returnFromFunction(hCPU, old_callback.GetMPTR());
 }
 
@@ -412,7 +903,7 @@ void padscoreExport_KPADSetConnectCallback(PPCInterpreter_t* hCPU)
 	ppcDefineParamU32(channel, 0);
 	ppcDefineParamMPTR(callback, 1);
 
-	cemuLog_log(LogType::InputAPI, "KPADSetConnectCallback({}, 0x{:x})",channel, callback);
+	cemuLog_log(LogType::Force, "KPADSetConnectCallback({}, 0x{:x})",channel, callback);
 
 	if (channel >= InputManager::kMaxWPADControllers)
 	{
@@ -423,6 +914,9 @@ void padscoreExport_KPADSetConnectCallback(PPCInterpreter_t* hCPU)
 
 	const auto old_callback = padscore::g_padscore.controller_data[channel].connectCallback;
 	padscore::g_padscore.controller_data[channel].connectCallback = callback;
+	padscore::g_padscore.controller_data[channel].callback_initialized = false;
+	padscore::g_padscore.controller_data[channel].last_connected_state = false;
+
 	osLib_returnFromFunction(hCPU, old_callback.GetMPTR());
 }
 
@@ -699,30 +1193,33 @@ namespace padscore
 		{
 			if (g_padscore.controller_data[i].connectCallback) 
 			{
-				if(!g_padscore.controller_data[i].disconnectCalled)
+				const auto controller = instance.get_wpad_controller(i);
+				const bool is_connected = controller && controller->is_connected();
+
+				if (!g_padscore.controller_data[i].callback_initialized)
 				{
-					g_padscore.controller_data[i].disconnectCalled = true;
-					cemuLog_log(LogType::InputAPI, "Calling WPADConnectCallback({}, {})", i, WPAD_ERR_NO_CONTROLLER);
-					PPCCoreCallback(g_padscore.controller_data[i].connectCallback, i, WPAD_ERR_NO_CONTROLLER);
+					g_padscore.controller_data[i].callback_initialized = true;
+					g_padscore.controller_data[i].last_connected_state = is_connected;
+					sint32 err = is_connected ? WPAD_ERR_NONE : WPAD_ERR_NO_CONTROLLER;
+					cemuLog_log(LogType::Force, "Calling initial WPADConnectCallback({}, {})", i, err);
+					PPCCoreCallback(g_padscore.controller_data[i].connectCallback, i, err);
 					continue;
 				}
 
-				if (const auto controller = instance.get_wpad_controller(i))
+				if (controller && controller->was_home_button_down())
 				{
-					if (controller->m_status == WPADController::ConnectCallbackStatus::ReportDisconnect || controller->was_home_button_down()) // fixed!
-					{
-						controller->m_status = WPADController::ConnectCallbackStatus::ReportConnect;
+					cemuLog_log(LogType::Force, "Home button pressed on channel {}, toggling connect", i);
+					PPCCoreCallback(g_padscore.controller_data[i].connectCallback, i, WPAD_ERR_NO_CONTROLLER);
+					PPCCoreCallback(g_padscore.controller_data[i].connectCallback, i, WPAD_ERR_NONE);
+					continue;
+				}
 
-						cemuLog_log(LogType::InputAPI, "Calling WPADConnectCallback({}, {})", i, WPAD_ERR_NO_CONTROLLER);
-						PPCCoreCallback(g_padscore.controller_data[i].connectCallback, i, WPAD_ERR_NO_CONTROLLER);
-						
-					}
-					else if (controller->m_status == WPADController::ConnectCallbackStatus::ReportConnect) 
-					{
-						controller->m_status = WPADController::ConnectCallbackStatus::None;
-						cemuLog_log(LogType::InputAPI, "Calling WPADConnectCallback({}, {})", i, WPAD_ERR_NONE);
-						PPCCoreCallback(g_padscore.controller_data[i].connectCallback, i, WPAD_ERR_NONE);
-					}
+				if (is_connected != g_padscore.controller_data[i].last_connected_state)
+				{
+					g_padscore.controller_data[i].last_connected_state = is_connected;
+					sint32 err = is_connected ? WPAD_ERR_NONE : WPAD_ERR_NO_CONTROLLER;
+					cemuLog_log(LogType::Force, "Channel {} connection state changed to {}, calling WPADConnectCallback", i, err);
+					PPCCoreCallback(g_padscore.controller_data[i].connectCallback, i, err);
 				}
 			}
 		}
@@ -734,10 +1231,10 @@ namespace padscore
 			{
 				if (const auto controller = instance.get_wpad_controller(i))
 				{
-					if (controller->m_extension_status == WPADController::ConnectCallbackStatus::ReportConnect)
+					if (controller->is_connected() && controller->m_extension_status == WPADController::ConnectCallbackStatus::ReportConnect)
 					{
 						controller->m_extension_status = WPADController::ConnectCallbackStatus::None;
-						cemuLog_log(LogType::InputAPI, "Calling WPADextensionCallback({})", i);
+						cemuLog_log(LogType::Force, "Calling WPADextensionCallback({}, devType: {})", i, controller->get_device_type());
 						PPCCoreCallback(g_padscore.controller_data[i].extension_callback, i, controller->get_device_type());
 					}
 				}
@@ -828,6 +1325,64 @@ namespace padscore
 			osLib_addFunction("padscore", "WPADControlDpd", padscoreExport_WPADControlDpd);
 
 			osLib_addFunction("padscore", "WPADSetCallbackByKPAD", padscore::export_WPADSetCallbackByKPAD);
+
+			// WBC / Balance Board
+			osLib_addFunction("padscore", "WPADIsRegisteredBLC", padscoreExport_WPADIsRegisteredBLC);
+			osLib_addFunction("padscore", "WPADRegisterBLCWorkarea", padscoreExport_WPADRegisterBLCWorkarea);
+			osLib_addFunction("padscore", "WPADEnableWBC", padscoreExport_WPADEnableWBC);
+			osLib_addFunction("padscore", "WBCSetupCalibration", padscoreExport_WBCSetupCalibration);
+			osLib_addFunction("padscore", "WBCGetCalibrationStatus", padscoreExport_WBCGetCalibrationStatus);
+			osLib_addFunction("padscore", "WPADGetBLCalibration", padscoreExport_WPADGetBLCalibration);
+			osLib_addFunction("padscore", "WBCRead", padscoreExport_WBCRead);
+			osLib_addFunction("padscore", "WBCGetTGCWeight", padscoreExport_WBCGetTGCWeight);
+			osLib_addFunction("padscore", "WBCGetBatteryLevel", padscoreExport_WBCGetBatteryLevel);
+			osLib_addFunction("padscore", "WBCSetZEROPoint", padscoreExport_WBCSetZEROPoint);
+			osLib_addFunction("padscore", "WPADControlBLC", padscoreExport_WPADControlBLC);
+
+			// WPAD peripherals
+			osLib_addFunction("padscore", "WPADRegisterAllocator", padscoreExport_WPADRegisterAllocator);
+			osLib_addFunction("padscore", "WPADDisconnect", padscoreExport_WPADDisconnect);
+			osLib_addFunction("padscore", "WPADSetAutoSleepTime", padscoreExport_WPADSetAutoSleepTime);
+			osLib_addFunction("padscore", "WPADSetSensorBar", padscoreExport_WPADSetSensorBar);
+			osLib_addFunction("padscore", "WPADGetSensorBarPosition", padscoreExport_WPADGetSensorBarPosition);
+			osLib_addFunction("padscore", "WPADGetSpeakerVolume", padscoreExport_WPADGetSpeakerVolume);
+			osLib_addFunction("padscore", "WPADIsMplsIntegrated", padscoreExport_WPADIsMplsIntegrated);
+			osLib_addFunction("padscore", "WPADCanSendStreamData", padscoreExport_WPADCanSendStreamData);
+			osLib_addFunction("padscore", "WPADSendStreamData", padscoreExport_WPADSendStreamData);
+			osLib_addFunction("padscore", "WPADControlSpeaker", padscoreExport_WPADControlSpeaker);
+
+			// KPAD Mpls stubs
+			osLib_addFunction("padscore", "KPADEnableMpls", padscoreExport_KPADEnableMpls);
+			osLib_addFunction("padscore", "KPADDisableMpls", padscoreExport_KPADDisableMpls);
+			osLib_addFunction("padscore", "KPADEnableMplsAccRevise", padscoreExport_KPADEnableMplsAccRevise);
+			osLib_addFunction("padscore", "KPADDisableMplsAccRevise", padscoreExport_KPADDisableMplsAccRevise);
+			osLib_addFunction("padscore", "KPADEnableMplsDirRevise", padscoreExport_KPADEnableMplsDirRevise);
+			osLib_addFunction("padscore", "KPADDisableMplsDirRevise", padscoreExport_KPADDisableMplsDirRevise);
+			osLib_addFunction("padscore", "KPADEnableMplsZeroPlay", padscoreExport_KPADEnableMplsZeroPlay);
+			osLib_addFunction("padscore", "KPADDisableMplsZeroPlay", padscoreExport_KPADDisableMplsZeroPlay);
+			osLib_addFunction("padscore", "KPADIsEnableMplsZeroDrift", padscoreExport_KPADIsEnableMplsZeroDrift);
+			osLib_addFunction("padscore", "KPADResetMpls", padscoreExport_KPADResetMpls);
+			osLib_addFunction("padscore", "KPADSetAccParam", padscoreExport_KPADSetAccParam);
+			osLib_addFunction("padscore", "KPADSetDistParam", padscoreExport_KPADSetDistParam);
+			osLib_addFunction("padscore", "KPADSetHoriParam", padscoreExport_KPADSetHoriParam);
+			osLib_addFunction("padscore", "KPADSetPosParam", padscoreExport_KPADSetPosParam);
+			osLib_addFunction("padscore", "KPADSetSensorHeight", padscoreExport_KPADSetSensorHeight);
+			osLib_addFunction("padscore", "KPADSetReviseMode", padscoreExport_KPADSetReviseMode);
+			osLib_addFunction("padscore", "KPADSetControlMplsCallback", padscoreExport_KPADSetControlMplsCallback);
+			osLib_addFunction("padscore", "KPADSetMplsWorkarea", padscoreExport_KPADSetMplsWorkarea);
+			osLib_addFunction("padscore", "KPADSetMplsDirection", padscoreExport_KPADSetMplsDirection);
+			osLib_addFunction("padscore", "KPADSetMplsMagnification", padscoreExport_KPADSetMplsMagnification);
+			osLib_addFunction("padscore", "KPADSetMplsAccReviseParam", padscoreExport_KPADSetMplsAccReviseParam);
+			osLib_addFunction("padscore", "KPADSetMplsDirReviseBase", padscoreExport_KPADSetMplsDirReviseBase);
+			osLib_addFunction("padscore", "KPADSetMplsDirReviseParam", padscoreExport_KPADSetMplsDirReviseParam);
+			osLib_addFunction("padscore", "KPADSetMplsZeroPlayParam", padscoreExport_KPADSetMplsZeroPlayParam);
+			osLib_addFunction("padscore", "KPADStartMplsCalibration", padscoreExport_KPADStartMplsCalibration);
+			osLib_addFunction("padscore", "KPADWorkMplsCalibration", padscoreExport_KPADWorkMplsCalibration);
+			osLib_addFunction("padscore", "KPADDisableDPD", padscoreExport_KPADDisableDPD);
+			osLib_addFunction("padscore", "KPADDisableMplsDpdRevise", padscoreExport_KPADDisableMplsDpdRevise);
+			osLib_addFunction("padscore", "KPADEnableMplsDpdRevise", padscoreExport_KPADEnableMplsDpdRevise);
+			osLib_addFunction("padscore", "KPADReviseAcc", padscoreExport_KPADReviseAcc);
+			osLib_addFunction("padscore", "WENCGetEncodeData", padscoreExport_WENCGetEncodeData);
 		};
 
 	}s_COSCoreinitModule;

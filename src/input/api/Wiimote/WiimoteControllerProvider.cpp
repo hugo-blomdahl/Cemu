@@ -108,10 +108,19 @@ void WiimoteControllerProvider::RefreshControllers()
 		}
 		if (isDuplicate)
 			continue;
+		size_t targetIndex = 0;
 		if (lowestReplaceableIndex != -1)
+		{
+			targetIndex = (size_t)lowestReplaceableIndex;
 			m_wiimotes.replace(lowestReplaceableIndex, std::make_unique<Wiimote>(device));
+		}
 		else
+		{
+			targetIndex = m_wiimotes.size();
 			m_wiimotes.push_back(std::make_unique<Wiimote>(device));
+		}
+		const uint8 mask = (uint8)(1 << (4 + (targetIndex % 4)));
+		send_packet(targetIndex, {kLED, mask});
 	}
 }
 
@@ -147,9 +156,26 @@ void WiimoteControllerProvider::request_status(size_t index)
 void WiimoteControllerProvider::set_led(size_t index, size_t player_index)
 {
 	uint8 mask = 0;
-	mask |= 1 << (4 + (player_index % 4));
-	if (player_index >= 4)
-		mask |= 1 << (4 + ((player_index - 3) % 4));
+	bool is_bb = false;
+	{
+		std::shared_lock lock(m_device_mutex);
+		if (index < m_wiimotes.size())
+		{
+			std::shared_lock read_lock(m_wiimotes[index].mutex);
+			is_bb = std::holds_alternative<BalanceBoardData>(m_wiimotes[index].state.m_extension);
+		}
+	}
+
+	if (is_bb)
+	{
+		mask = 0x10; // Balance Board power button LED
+	}
+	else
+	{
+		mask |= 1 << (4 + (player_index % 4));
+		if (player_index >= 4)
+			mask |= 1 << (4 + ((player_index - 3) % 4));
+	}
 	send_packet(index, {kLED, mask});
 }
 
@@ -268,12 +294,15 @@ void WiimoteControllerProvider::reader_thread()
 					new_state.battery_level = *data;
 					++data;
 
-					new_state.ir_camera.mode = set_ir_camera(index, true);
-					if(!new_state.m_calibrated)
-						calibrate(index);
+					if (!std::holds_alternative<BalanceBoardData>(new_state.m_extension))
+					{
+						new_state.ir_camera.mode = set_ir_camera(index, true);
+						if(!new_state.m_calibrated)
+							calibrate(index);
 
-					if(!new_state.m_motion_plus)
-						detect_motion_plus(index);
+						if(!new_state.m_motion_plus)
+							detect_motion_plus(index);
+					}
 
 					if (HAS_FLAG(new_state.flags, kExtensionConnected))
 					{
@@ -342,7 +371,7 @@ void WiimoteControllerProvider::reader_thread()
 					{
 						if (size == 0xf)
 						{
-							cemuLog_logDebug(LogType::Force,"Extension type received but no extension connected");
+							cemuLog_log(LogType::Force,"Extension type received but no extension connected");
 							continue;
 						}
 
@@ -351,50 +380,70 @@ void WiimoteControllerProvider::reader_thread()
 						data += 6; // 48
 						be_type >>= 16;
 						be_type &= 0xFFFFFFFFFFFF;
-						switch (be_type.value())
+						const uint64 ext_val = be_type.value();
+						const uint16 ext_id_16 = (uint16)(ext_val & 0xFFFF);
+						cemuLog_log(LogType::Force, "Extension Type Raw: 0x{:012x} (id16: 0x{:04x})", ext_val, ext_id_16);
+
+						if (ext_val == kExtensionBalanceBoard || ext_id_16 == 0x0402 || ext_id_16 == 0x2A2C)
 						{
-						case kExtensionNunchuck:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: Nunchuck");
-							new_state.m_extension = NunchuckData{};
-							break;
-						case kExtensionClassic:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: Classic");
-							new_state.m_extension = ClassicData{};
-							break;
-						case kExtensionClassicPro:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: Classic Pro");
-							new_state.m_extension = ClassicData{};
-                            break;
-						case kExtensionGuitar:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: Guitar");
-                            break;
-						case kExtensionDrums:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: Drums");
-                            break;
-						case kExtensionBalanceBoard:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: Balance Board");
-                            break;
-						case kExtensionMotionPlus:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: MotionPlus");
-							set_motion_plus(index, true);
-							new_state.m_motion_plus = MotionPlusData{};
-							break;
-						case kExtensionPartialyInserted:
-                            cemuLog_logDebug(LogType::Force,"Extension only partially inserted");
-							new_state.m_extension = {};
-							request_status(index);
-							break;
-						case kExtensionMotionPlusInactive:
-                            cemuLog_logDebug(LogType::Force,"Extension Type Received: Inactive MotionPlus");
-							break;
-						default:
-                            cemuLog_logDebug(LogType::Force,"Unknown extension: {:#x}", be_type.value());
-                            new_state.m_extension = {};
-							break;
+							cemuLog_log(LogType::Force, "Extension Type Received: Balance Board (raw: 0x{:012x})", ext_val);
+							new_state.m_extension = BalanceBoardData{};
+							send_packet(index, {kLED, 0x10});
+						}
+						else
+						{
+							switch (ext_val)
+							{
+							case kExtensionNunchuck:
+								cemuLog_log(LogType::Force, "Extension Type Received: Nunchuck");
+								new_state.m_extension = NunchuckData{};
+								break;
+							case kExtensionClassic:
+								cemuLog_log(LogType::Force, "Extension Type Received: Classic");
+								new_state.m_extension = ClassicData{};
+								break;
+							case kExtensionClassicPro:
+								cemuLog_log(LogType::Force, "Extension Type Received: Classic Pro");
+								new_state.m_extension = ClassicData{};
+								break;
+							case kExtensionGuitar:
+								cemuLog_log(LogType::Force, "Extension Type Received: Guitar");
+								break;
+							case kExtensionDrums:
+								cemuLog_log(LogType::Force, "Extension Type Received: Drums");
+								break;
+							case kExtensionMotionPlus:
+								cemuLog_log(LogType::Force, "Extension Type Received: MotionPlus");
+								set_motion_plus(index, true);
+								new_state.m_motion_plus = MotionPlusData{};
+								break;
+							case kExtensionPartialyInserted:
+								cemuLog_log(LogType::Force, "Extension only partially inserted");
+								new_state.m_extension = {};
+								request_status(index);
+								break;
+							case kExtensionMotionPlusInactive:
+								cemuLog_log(LogType::Force, "Extension Type Received: Inactive MotionPlus");
+								break;
+							default:
+								cemuLog_log(LogType::Force, "Unknown extension: 0x{:012x}", ext_val);
+								new_state.m_extension = {};
+								break;
+							}
 						}
 
 						if (new_state.m_extension.index() != 0)
-							send_read_packet(index, kRegisterMemory, kRegisterExtensionCalibration, 0x10);
+						{
+							if (std::holds_alternative<BalanceBoardData>(new_state.m_extension))
+							{
+								send_read_packet(index, kRegisterMemory, (RegisterAddress)0x4a40024, 0x10);
+								send_read_packet(index, kRegisterMemory, (RegisterAddress)0x4a40034, 0x10);
+							}
+							else
+							{
+								send_read_packet(index, kRegisterMemory, kRegisterExtensionCalibration, 0x10);
+							}
+						}
 					}
 					else if (address == (kRegisterExtensionCalibration & 0xFFFF))
 					{
@@ -446,6 +495,34 @@ void WiimoteControllerProvider::reader_thread()
 								}
 							}, new_state.m_extension);
 					}
+					else if (address == 0x0024)
+					{
+						if (std::holds_alternative<BalanceBoardData>(new_state.m_extension))
+						{
+							auto& bb = std::get<BalanceBoardData>(new_state.m_extension);
+							bb.calibration.zero[0] = ((uint16)data[0] << 8) | data[1];
+							bb.calibration.zero[1] = ((uint16)data[2] << 8) | data[3];
+							bb.calibration.zero[2] = ((uint16)data[4] << 8) | data[5];
+							bb.calibration.zero[3] = ((uint16)data[6] << 8) | data[7];
+							bb.calibration.kg17[0] = ((uint16)data[8] << 8) | data[9];
+							bb.calibration.kg17[1] = ((uint16)data[10] << 8) | data[11];
+							bb.calibration.kg17[2] = ((uint16)data[12] << 8) | data[13];
+							bb.calibration.kg17[3] = ((uint16)data[14] << 8) | data[15];
+							cemuLog_log(LogType::Force, "Balance board calibration 0kg/17kg received: TR 0kg={}, 17kg={}", bb.calibration.zero[0], bb.calibration.kg17[0]);
+						}
+					}
+					else if (address == 0x0034)
+					{
+						if (std::holds_alternative<BalanceBoardData>(new_state.m_extension))
+						{
+							auto& bb = std::get<BalanceBoardData>(new_state.m_extension);
+							bb.calibration.kg34[0] = ((uint16)data[0] << 8) | data[1];
+							bb.calibration.kg34[1] = ((uint16)data[2] << 8) | data[3];
+							bb.calibration.kg34[2] = ((uint16)data[4] << 8) | data[5];
+							bb.calibration.kg34[3] = ((uint16)data[6] << 8) | data[7];
+							cemuLog_log(LogType::Force, "Balance board calibration 34kg received: TR 34kg={}", bb.calibration.kg34[0]);
+						}
+					}
 					else
 					{
                         cemuLog_logDebug(LogType::Force,"Unhandled read data received");
@@ -484,6 +561,7 @@ void WiimoteControllerProvider::reader_thread()
 					// 32 BB BB EE EE EE EE EE EE EE EE
 					new_state.buttons = *(uint16*)data & (~0x60E0);
 					data += 2;
+					parse_extension_8(new_state, data);
 					break;
 				}
 			case kDataCoreAccIR:
@@ -499,6 +577,7 @@ void WiimoteControllerProvider::reader_thread()
 					// 34 BB BB EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE 
 					new_state.buttons = *(uint16*)data & (~0x60E0);
 					data += 2;
+					parse_extension_8(new_state, data);
 					break;
 				}
 			case kDataCoreAccExt:
@@ -506,6 +585,7 @@ void WiimoteControllerProvider::reader_thread()
 					// 35 BB BB AA AA AA EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE
 					new_state.buttons = *(uint16*)data & (~0x60E0);
 					parse_acceleration(new_state, data);
+					parse_extension_8(new_state, data);
 					break;
 				}
 			case kDataCoreIRExt:
@@ -686,6 +766,7 @@ void WiimoteControllerProvider::reader_thread()
 			case kDataExt:
 				{
 					// 3d EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE
+					parse_extension_8(new_state, data);
 					break;
 				}
 			default:
@@ -1034,6 +1115,14 @@ void WiimoteControllerProvider::update_report_type(size_t index)
 	std::shared_lock read_lock(m_wiimotes[index].mutex);
 	auto& state = m_wiimotes[index].state;
 
+	if (std::holds_alternative<BalanceBoardData>(state.m_extension))
+	{
+		state.ir_camera.mode = kIRDisabled;
+		cemuLog_log(LogType::Force, "Setting report type for Balance Board to {}", kDataCoreExt8);
+		send_packet(index, {kType, 0x04, kDataCoreExt8});
+		return;
+	}
+
 	const bool extension = state.m_extension.index() != 0; // TODO || HasMotionPlus();
 	const bool ir = state.ir_camera.mode != kIRDisabled;
 	const bool motion = true; // UseMotion();
@@ -1101,14 +1190,8 @@ void WiimoteControllerProvider::send_packet(size_t index, std::vector<uint8> dat
 {
 	cemu_assert(data.size() > 1);
 
-	std::shared_lock device_lock(m_device_mutex);
-	if (index >= m_wiimotes.size())
-		return;
-
-	device_lock.unlock();
-
 	std::unique_lock lock(m_writer_mutex);
-	m_write_queue.emplace_back(index, data);
+	m_write_queue.emplace_back(index, std::move(data));
 	m_writer_cond.notify_one();
 }
 
@@ -1134,4 +1217,40 @@ void WiimoteControllerProvider::send_write_packet(size_t index, MemoryType type,
 	*(packet.data() + 2 + 3) = (uint8)data.size();
 	std::copy(data.begin(), data.end(), packet.data() + 2 + 3 + 1);
 	send_packet(index, std::move(packet));
+}
+
+void WiimoteControllerProvider::parse_extension_8(WiimoteState& state, const uint8* data)
+{
+	if (std::holds_alternative<BalanceBoardData>(state.m_extension))
+	{
+		auto& bb = std::get<BalanceBoardData>(state.m_extension);
+		bb.raw[0] = ((uint16)data[0] << 8) | data[1]; // Top Right
+		bb.raw[1] = ((uint16)data[2] << 8) | data[3]; // Bottom Right
+		bb.raw[2] = ((uint16)data[4] << 8) | data[5]; // Top Left
+		bb.raw[3] = ((uint16)data[6] << 8) | data[7]; // Bottom Left
+		bb.battery = state.battery_level;
+
+		for (int i = 0; i < 4; ++i)
+		{
+			uint16 val = bb.raw[i];
+			uint16 c0 = bb.calibration.zero[i];
+			uint16 c17 = bb.calibration.kg17[i];
+			uint16 c34 = bb.calibration.kg34[i];
+
+			if (val <= c0)
+			{
+				bb.kg[i] = 0.0f;
+			}
+			else if (val < c17)
+			{
+				float diff = (c17 > c0) ? (float)(c17 - c0) : 1.0f;
+				bb.kg[i] = 17.0f * ((float)(val - c0) / diff);
+			}
+			else
+			{
+				float diff = (c34 > c17) ? (float)(c34 - c17) : 1.0f;
+				bb.kg[i] = 17.0f + 17.0f * ((float)(val - c17) / diff);
+			}
+		}
+	}
 }

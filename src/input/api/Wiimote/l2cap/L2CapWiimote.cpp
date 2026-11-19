@@ -1,7 +1,9 @@
 #include "L2CapWiimote.h"
+#include "config/ActiveSettings.h"
 #include <bluetooth/l2cap.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <fstream>
 
 constexpr auto comparator = [](const bdaddr_t& a, const bdaddr_t& b) {
 	return bacmp(&a, &b);
@@ -9,6 +11,46 @@ constexpr auto comparator = [](const bdaddr_t& a, const bdaddr_t& b) {
 
 static auto s_addresses = std::map<bdaddr_t, bool, decltype(comparator)>(comparator);
 static std::mutex s_addressMutex;
+
+static void LoadSavedAddresses()
+{
+	static bool loaded = false;
+	if (loaded)
+		return;
+	loaded = true;
+
+	std::error_code ec;
+	const auto filePath = ActiveSettings::GetConfigPath("wiimotes.txt");
+	if (!fs::exists(filePath, ec))
+		return;
+
+	std::ifstream f(filePath);
+	std::string line;
+	while (std::getline(f, line))
+	{
+		bdaddr_t addr{};
+		int b[6];
+		if (sscanf(line.c_str(), "%02x:%02x:%02x:%02x:%02x:%02x", &b[5], &b[4], &b[3], &b[2], &b[1], &b[0]) == 6)
+		{
+			for (int i = 0; i < 6; ++i)
+				addr.b[i] = (uint8)b[i];
+			s_addresses.try_emplace(addr, false);
+			cemuLog_log(LogType::Force, "Loaded saved Wiimote address: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+						b[5], b[4], b[3], b[2], b[1], b[0]);
+		}
+	}
+}
+
+static void SaveAddresses()
+{
+	const auto filePath = ActiveSettings::GetConfigPath("wiimotes.txt");
+	std::ofstream f(filePath, std::ios::trunc);
+	for (const auto& [addr, _] : s_addresses)
+	{
+		const auto& b = addr.b;
+		f << fmt::format("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n", b[5], b[4], b[3], b[2], b[1], b[0]);
+	}
+}
 
 static bool AttemptConnect(int sockFd, const sockaddr_l2& addr)
 {
@@ -46,12 +88,15 @@ L2CapWiimote::~L2CapWiimote()
 void L2CapWiimote::AddCandidateAddress(bdaddr_t addr)
 {
 	std::scoped_lock lock(s_addressMutex);
+	LoadSavedAddresses();
 	s_addresses.try_emplace(addr, false);
+	SaveAddresses();
 }
 
 std::vector<WiimoteDevicePtr> L2CapWiimote::get_devices()
 {
 	s_addressMutex.lock();
+	LoadSavedAddresses();
 	std::vector<bdaddr_t> unconnected;
 	for (const auto& [addr, connected] : s_addresses)
 	{
@@ -107,6 +152,9 @@ std::vector<WiimoteDevicePtr> L2CapWiimote::get_devices()
 			close(controlFd);
 			continue;
 		}
+		const auto& b = addr.b;
+		cemuLog_log(LogType::Force, "Connected to Wiimote/BalanceBoard at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+					b[5], b[4], b[3], b[2], b[1], b[0]);
 		outDevices.emplace_back(std::make_shared<L2CapWiimote>(controlFd, dataFd, addr));
 
 		s_addressMutex.lock();

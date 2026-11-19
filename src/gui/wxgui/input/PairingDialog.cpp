@@ -133,6 +133,7 @@ void PairingDialog::WorkerThread()
 {
 	const std::wstring wiimoteName = L"Nintendo RVL-CNT-01";
 	const std::wstring wiiUProControllerName = L"Nintendo RVL-CNT-01-UC";
+	const std::wstring balanceBoardName = L"Nintendo RVL-WBC-01";
 
 	const GUID bthHidGuid = {0x00001124, 0x0000, 0x1000, {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB}};
 
@@ -190,7 +191,7 @@ void PairingDialog::WorkerThread()
 
 		while (!m_threadShouldQuit)
 		{
-			if (info.szName == wiimoteName || info.szName == wiiUProControllerName)
+			if (info.szName == wiimoteName || info.szName == wiiUProControllerName || info.szName == balanceBoardName)
 			{
 				BluetoothFindDeviceClose(deviceFind);
 
@@ -231,7 +232,7 @@ void PairingDialog::WorkerThread()
 	constexpr static uint8_t LIAC_LAP[] = {0x00, 0x8b, 0x9e};
 
 	constexpr static auto isWiimoteName = [](std::string_view name) {
-		return name == "Nintendo RVL-CNT-01" || name == "Nintendo RVL-CNT-01-TR";
+		return name == "Nintendo RVL-CNT-01" || name == "Nintendo RVL-CNT-01-TR" || name == "Nintendo RVL-WBC-01";
 	};
 
 	// Get default BT device

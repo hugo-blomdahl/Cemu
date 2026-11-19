@@ -29,7 +29,7 @@ private:
 
 	wxGridBagSizer* m_item_sizer;
 
-	wxCheckBox* m_nunchuck, * m_classic;
+	wxCheckBox* m_nunchuck, * m_classic, * m_balance_board;
 	wxCheckBox* m_motion_plus;
 
 	wxSlider* m_volume;

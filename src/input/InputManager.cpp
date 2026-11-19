@@ -504,7 +504,28 @@ std::shared_ptr<WPADController> InputManager::get_wpad_controller(size_t index) 
 		return {};
 
 	std::shared_lock lock(m_mutex);
-	return std::dynamic_pointer_cast<WPADController>(m_wpad[index]);
+	if (index == 3)
+	{
+		// On real Wii / Wii U hardware, the Balance Board is synchronized to Player 4 (channel 3).
+		if (auto pad = std::dynamic_pointer_cast<WPADController>(m_wpad[3]))
+			return pad;
+		// If channel 3 is unmapped, alias any configured Balance Board to channel 3
+		for (const auto& wpad : m_wpad)
+		{
+			if (auto candidate = std::dynamic_pointer_cast<WPADController>(wpad))
+			{
+				if (candidate->get_device_type() == kWAPDevBalanceChecker)
+					return candidate;
+			}
+		}
+		return {};
+	}
+
+	// Channels 0, 1, 2: Balance Board can never occupy channels 0, 1, 2
+	auto pad = std::dynamic_pointer_cast<WPADController>(m_wpad[index]);
+	if (pad && pad->get_device_type() == kWAPDevBalanceChecker)
+		return {};
+	return pad;
 }
 
 std::pair<size_t, size_t> InputManager::get_controller_count() const

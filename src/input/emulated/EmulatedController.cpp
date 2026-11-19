@@ -98,6 +98,14 @@ void EmulatedController::stop_rumble()
 	}
 }
 
+bool EmulatedController::is_connected()
+{
+	std::shared_lock lock(m_mutex);
+	if (m_controllers.empty())
+		return false;
+	return std::any_of(m_controllers.begin(), m_controllers.end(), [](const auto& c) { return c && c->is_connected(); });
+}
+
 bool EmulatedController::is_battery_low() const
 {
 	std::shared_lock lock(m_mutex);

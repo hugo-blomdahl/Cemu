@@ -58,6 +58,10 @@ WiimoteInputPanel::WiimoteInputPanel(wxWindow* parent)
 	m_classic->Hide();
 	extensions_sizer->Add(m_classic);
 
+	m_balance_board = new wxCheckBox(this, wxID_ANY, _("Balance Board"));
+	m_balance_board->Bind(wxEVT_CHECKBOX, &WiimoteInputPanel::on_extension_change, this);
+	extensions_sizer->Add(m_balance_board);
+
 	main_sizer->Add(horiz_main_sizer, 0, wxEXPAND | wxALL, 5);
 	main_sizer->Add(new wxStaticLine(this), 0, wxLEFT | wxRIGHT | wxTOP | wxEXPAND, 5);
 
@@ -183,6 +187,7 @@ void WiimoteInputPanel::set_active_device_type(WPADDeviceType type)
 	case kWAPDevMPLSFreeStyle:
 		m_nunchuck->SetValue(true);
 		m_classic->SetValue(false);
+		m_balance_board->SetValue(false);
 		for (const auto& item : m_nunchuck_items)
 		{
 			item->Enable(true);
@@ -193,6 +198,18 @@ void WiimoteInputPanel::set_active_device_type(WPADDeviceType type)
 	case kWAPDevMPLSClassic:
 		m_nunchuck->SetValue(false);
 		m_classic->SetValue(true);
+		m_balance_board->SetValue(false);
+		for (const auto& item : m_nunchuck_items)
+		{
+			item->Enable(false);
+		}
+		break;
+
+	case kWAPDevBalanceChecker:
+		m_nunchuck->SetValue(false);
+		m_classic->SetValue(false);
+		m_balance_board->SetValue(true);
+		m_motion_plus->SetValue(false);
 		for (const auto& item : m_nunchuck_items)
 		{
 			item->Enable(false);
@@ -202,6 +219,7 @@ void WiimoteInputPanel::set_active_device_type(WPADDeviceType type)
 	default:
 		m_nunchuck->SetValue(false);
 		m_classic->SetValue(false);
+		m_balance_board->SetValue(false);
 		for (const auto& item : m_nunchuck_items)
 		{
 			item->Enable(false);
@@ -225,17 +243,16 @@ void WiimoteInputPanel::on_extension_change(wxCommandEvent& event)
 		set_active_device_type(kWAPDevFreestyle);
 	else if (m_classic->GetValue())
 		set_active_device_type(kWAPDevClassic);
+	else if (m_balance_board->GetValue())
+		set_active_device_type(kWAPDevBalanceChecker);
 	else 
 		set_active_device_type(kWAPDevCore);
 }
 
 void WiimoteInputPanel::on_timer(const EmulatedControllerPtr& emulated_controller, const ControllerPtr& controller)
 {
-	if (emulated_controller)
+	if (const auto wiimote = std::dynamic_pointer_cast<WiimoteController>(emulated_controller))
 	{
-		const auto wiimote = std::dynamic_pointer_cast<WiimoteController>(emulated_controller);
-		wxASSERT(wiimote);
-
 		wiimote->set_device_type(m_device_type);
 	}
 
@@ -252,9 +269,7 @@ void WiimoteInputPanel::load_controller(const EmulatedControllerPtr& emulated_co
 {
 	InputPanel::load_controller(emulated_controller);
 
-	if (emulated_controller) {
-		const auto wiimote = std::dynamic_pointer_cast<WiimoteController>(emulated_controller);
-		wxASSERT(wiimote);
+	if (const auto wiimote = std::dynamic_pointer_cast<WiimoteController>(emulated_controller)) {
 		set_active_device_type(wiimote->get_device_type());
 	}
 }

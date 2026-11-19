@@ -55,6 +55,7 @@ public:
 	void start_rumble();
 	void stop_rumble();
 
+	bool is_connected();
 	bool is_battery_low() const;
 
 	bool has_motion() const;

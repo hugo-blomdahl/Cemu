@@ -11,6 +11,7 @@ enum WPADDeviceType
 	kWAPDevCore = 0,
 	kWAPDevFreestyle = 1,
 	kWAPDevClassic = 2,
+	kWAPDevBalanceChecker = 3,
 	kWAPDevMPLS = 5,
 	kWAPDevMPLSFreeStyle = 6,
 	kWAPDevMPLSClassic = 7,
@@ -114,7 +115,12 @@ public:
 
 	virtual WPADDeviceType get_device_type() const = 0;
 
-	WPADDataFormat get_data_format() const { return m_data_format; }
+	WPADDataFormat get_data_format() const
+	{
+		if (get_device_type() == kWAPDevBalanceChecker)
+			return kDataFormat_BALANCE_CHECKER;
+		return m_data_format;
+	}
 	void set_data_format(WPADDataFormat data_format) { m_data_format = data_format; }
 
 	void WPADRead(WPADStatus_t* status);
@@ -132,6 +138,8 @@ public:
 	ConnectCallbackStatus m_extension_status = ConnectCallbackStatus::ReportConnect;
 
 	WPADDataFormat get_default_data_format() const;
+
+	bool get_balance_board_data(struct BalanceBoardData& out) const;
 
 protected:
 	WPADDataFormat m_data_format;
